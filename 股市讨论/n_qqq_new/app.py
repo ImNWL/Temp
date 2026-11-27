@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import math
 import re
 import sys
 from dataclasses import dataclass
@@ -36,13 +35,6 @@ FALLBACK_PALETTE = [
     "#65A30D",  # Olive Green
 ]
 SYNTH_CUSTOM_COLOR = "#059669"  # Emerald
-
-MARKET_REGIMES = [
-    ("2008 次贷危机", date(2007, 10, 31), date(2009, 3, 9), "rgba(225, 29, 72, 0.05)"),
-    ("2020 疫情熔断", date(2020, 2, 19), date(2020, 3, 23), "rgba(217, 119, 6, 0.06)"),
-    ("2022 加息熊市", date(2022, 1, 3), date(2022, 12, 28), "rgba(37, 99, 235, 0.05)"),
-]
-
 
 @dataclass
 class DatasetEntry:
@@ -80,10 +72,19 @@ st.markdown(
         font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
         font-variant-numeric: tabular-nums;
     }
-    .block-container {
-        padding-top: 1.5rem;
+    .block-container,
+    [data-testid="stMainBlockContainer"] {
+        padding-top: 1.25rem;
         padding-bottom: 2.25rem;
-        max-width: 1480px;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+        max-width: none;
+    }
+    header[data-testid="stHeader"],
+    [data-testid="stToolbar"],
+    [data-testid="stSidebarHeader"] {
+        height: 2rem;
+        min-height: 2rem;
     }
 
     /* Sidebar subtle separation & polish */
@@ -101,16 +102,17 @@ st.markdown(
         align-items: center;
         justify-content: space-between;
         flex-wrap: wrap;
-        gap: 0.75rem;
-        margin-bottom: 0.75rem;
+        gap: 0.4rem;
+        margin-bottom: 0.35rem;
     }
-    .hero-title {
-        font-size: 1.65rem;
-        font-weight: 700;
+    [data-testid="stMarkdownContainer"] h1.hero-title {
+        font-size: 1.05rem;
+        font-weight: 600;
         color: #0F172A;
         letter-spacing: -0.02em;
         margin: 0;
-        line-height: 1.25;
+        padding: 0;
+        line-height: 1.3;
     }
     .hero-title span.accent {
         color: #2563EB;
@@ -128,9 +130,10 @@ st.markdown(
         color: #1D4ED8;
         border: 1px solid #BFDBFE;
         border-radius: 999px;
-        padding: 4px 12px;
-        font-size: 0.78rem;
-        font-weight: 600;
+        padding: 2px 8px;
+        font-size: 0.7rem;
+        font-weight: 500;
+        line-height: 1.3;
     }
 
     /* Soft elevated cards for bordered containers */
@@ -371,68 +374,10 @@ def _compute_preset_dates(
     return s, e
 
 
-def _place_end_labels(
-    items: list[tuple[str, pd.Timestamp, float, str, bool]],
-    use_log: bool,
-    y_min_val: float,
-    y_max_val: float,
-) -> list[dict]:
-    if not items:
-        return []
-
-    def to_vis(v: float) -> float:
-        return math.log10(v) if use_log and v > 0 else v
-
-    def from_vis(vv: float) -> float:
-        return 10 ** vv if use_log else vv
-
-    vis_low = to_vis(y_min_val)
-    vis_high = to_vis(y_max_val)
-    span = max(vis_high - vis_low, 1e-6)
-    min_gap = span * 0.058
-
-    prepared = []
-    for text, dt, raw_y, color, is_dimmed in items:
-        if pd.isna(raw_y) or (use_log and raw_y <= 0):
-            continue
-        prepared.append(
-            {
-                "text": text,
-                "dt": dt,
-                "vis_y": to_vis(float(raw_y)),
-                "color": color,
-                "dimmed": is_dimmed,
-            }
-        )
-
-    prepared.sort(key=lambda item: item["vis_y"])
-    for i in range(1, len(prepared)):
-        prev_y = prepared[i - 1]["vis_y"]
-        if prepared[i]["vis_y"] - prev_y < min_gap:
-            prepared[i]["vis_y"] = prev_y + min_gap
-
-    if len(prepared) >= 2 and prepared[-1]["vis_y"] > vis_high + min_gap:
-        shift = prepared[-1]["vis_y"] - (vis_high + min_gap * 0.5)
-        for item in prepared:
-            item["vis_y"] -= shift
-        for i in range(1, len(prepared)):
-            if prepared[i]["vis_y"] - prepared[i - 1]["vis_y"] < min_gap:
-                prepared[i]["vis_y"] = prepared[i - 1]["vis_y"] + min_gap
-
-    for item in prepared:
-        # Plotly annotations on a log y-axis expect log10 coordinates
-        item["y"] = item["vis_y"]
-    return prepared
-
-
 def build_main_chart(
     nav_df: pd.DataFrame,
     meta_map: dict[str, CurveMeta],
-    use_log_scale: bool,
-    show_drawdown: bool,
-    show_end_labels: bool,
-    show_regimes: bool,
-    focus_curve: str,
+    use_log_scale: bool = False,
 ) -> go.Figure:
     is_return_mode = not use_log_scale
     plot_df = (nav_df - 1.0) if is_return_mode else nav_df.copy()
@@ -440,21 +385,16 @@ def build_main_chart(
     if use_log_scale:
         plot_df = plot_df.where(plot_df > 0)
 
-    if show_drawdown:
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.06,
-            row_heights=[0.74, 0.26],
-        )
-        chart_height = 670
-    else:
-        fig = make_subplots(rows=1, cols=1)
-        chart_height = 550
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.74, 0.26],
+    )
+    chart_height = 670
 
     hover_fmt = "%{y:+.2%}" if is_return_mode else "%{y:.2f}x"
-    end_label_candidates: list[tuple[str, pd.Timestamp, float, str, bool]] = []
 
     for col in plot_df.columns:
         meta = meta_map[col]
@@ -463,26 +403,22 @@ def build_main_chart(
         if valid.empty:
             continue
 
-        is_focused = focus_curve == "全部均衡显示" or focus_curve == col
-        opacity = 1.0 if is_focused else 0.18
-        line_width = (meta.width + 0.9) if (focus_curve == col) else (meta.width if is_focused else 1.2)
-
-        # Subtle area breath under QQQ (or single focused curve) in linear mode
-        use_subtle_fill = (
-            not use_log_scale
-            and (
-                (focus_curve == col)
-                or (focus_curve == "全部均衡显示" and col == "QQQ")
-            )
-        )
+        opacity = 1.0
+        line_width = meta.width
+        use_subtle_fill = not use_log_scale and col == "QQQ"
         fill_color = "rgba(37, 99, 235, 0.05)" if use_subtle_fill else None
+
+        last_val = float(valid.iloc[-1])
+        val_txt = f"{last_val:+.1%}" if is_return_mode else f"{last_val:.2f}x"
+        legend_name = f"{col}  {val_txt}"
 
         fig.add_trace(
             go.Scatter(
                 x=series.index,
                 y=series,
                 mode="lines",
-                name=col,
+                name=legend_name,
+                legendgroup=col,
                 line=dict(color=meta.color, width=line_width, dash=meta.dash),
                 fill="tozeroy" if (use_subtle_fill and is_return_mode) else None,
                 fillcolor=fill_color if is_return_mode else None,
@@ -494,36 +430,27 @@ def build_main_chart(
             col=1,
         )
 
-        if show_end_labels:
-            last_dt = valid.index[-1]
-            last_val = float(valid.iloc[-1])
-            val_txt = f"{last_val:+.1%}" if is_return_mode else f"{last_val:.2f}x"
-            end_label_candidates.append(
-                (f" {col}  {val_txt} ", last_dt, last_val, meta.color, not is_focused)
+        nav_valid = nav_df[col].dropna()
+        if not nav_valid.empty:
+            dd = (nav_valid / nav_valid.cummax() - 1.0).reindex(nav_df.index)
+            fig.add_trace(
+                go.Scatter(
+                    x=dd.index,
+                    y=dd,
+                    mode="lines",
+                    name=f"{col} 回撤",
+                    legendgroup=col,
+                    showlegend=False,
+                    line=dict(color=meta.color, width=max(0.8, line_width - 0.3), dash=meta.dash),
+                    fill="tozeroy" if col == "QQQ" else None,
+                    fillcolor="rgba(37, 99, 235, 0.07)" if col == "QQQ" else None,
+                    opacity=opacity,
+                    connectgaps=False,
+                    hovertemplate=f"{col} 回撤: %{{y:.1%}}<extra></extra>",
+                ),
+                row=2,
+                col=1,
             )
-
-        if show_drawdown:
-            nav_valid = nav_df[col].dropna()
-            if not nav_valid.empty:
-                dd = (nav_valid / nav_valid.cummax() - 1.0).reindex(nav_df.index)
-                fig.add_trace(
-                    go.Scatter(
-                        x=dd.index,
-                        y=dd,
-                        mode="lines",
-                        name=f"{col} 回撤",
-                        legendgroup=col,
-                        showlegend=False,
-                        line=dict(color=meta.color, width=max(1.2, line_width - 0.5), dash=meta.dash),
-                        fill="tozeroy" if (col == "QQQ" or focus_curve == col) else None,
-                        fillcolor="rgba(37, 99, 235, 0.07)" if (col == "QQQ" or focus_curve == col) else None,
-                        opacity=opacity,
-                        connectgaps=False,
-                        hovertemplate=f"{col} 回撤: %{{y:.1%}}<extra></extra>",
-                    ),
-                    row=2,
-                    col=1,
-                )
 
     baseline_y = 0.0 if is_return_mode else 1.0
     if not (use_log_scale and not is_return_mode):
@@ -536,66 +463,14 @@ def build_main_chart(
             col=1,
         )
 
-    if show_regimes and not plot_df.empty:
-        win_start = plot_df.index.min().date()
-        win_end = plot_df.index.max().date()
-        for label, r_start, r_end, fill_rgba in MARKET_REGIMES:
-            ov_start = max(win_start, r_start)
-            ov_end = min(win_end, r_end)
-            if ov_start < ov_end:
-                fig.add_vrect(
-                    x0=ov_start.isoformat(),
-                    x1=ov_end.isoformat(),
-                    fillcolor=fill_rgba,
-                    line_width=0,
-                    layer="below",
-                    annotation_text=label,
-                    annotation_position="top left",
-                    annotation_font=dict(size=10, color="#64748B"),
-                    row=1,
-                    col=1,
-                )
-
-    if show_end_labels and end_label_candidates:
-        all_valid_vals = plot_df.stack().dropna()
-        if not all_valid_vals.empty:
-            y_min_v = float(all_valid_vals.min())
-            y_max_v = float(all_valid_vals.max())
-            placed = _place_end_labels(
-                end_label_candidates,
-                use_log=(use_log_scale and not is_return_mode),
-                y_min_val=y_min_v,
-                y_max_val=y_max_v,
-            )
-            for item in placed:
-                fig.add_annotation(
-                    x=item["dt"],
-                    y=item["y"],
-                    text=item["text"],
-                    showarrow=False,
-                    xanchor="left",
-                    xshift=10,
-                    xref="x",
-                    yref="y",
-                    opacity=0.25 if item["dimmed"] else 0.96,
-                    font=dict(size=11, color=item["color"], family="Inter, -apple-system, sans-serif"),
-                    bgcolor="rgba(255, 255, 255, 0.90)",
-                    bordercolor="rgba(226, 232, 240, 0.95)",
-                    borderwidth=1,
-                    borderpad=3,
-                )
-
     x_min = plot_df.index.min()
     x_max = plot_df.index.max()
-    if show_end_labels and x_max > x_min:
-        pad_days = max(int((x_max - x_min).days * 0.22), 14)
-        x_range = [x_min, x_max + pd.Timedelta(days=pad_days)]
-    else:
-        x_range = [x_min, x_max]
+    x_range = [x_min, x_max]
 
     fig.update_layout(
         height=chart_height,
         margin=dict(l=8, r=18, t=42, b=8),
+        showlegend=True,
         hovermode="x unified",
         hoverlabel=dict(
             align="left",
@@ -607,8 +482,8 @@ def build_main_chart(
             orientation="h",
             yanchor="bottom",
             y=1.02,
-            xanchor="left",
-            x=0,
+            xanchor="right",
+            x=1,
             bgcolor="rgba(0,0,0,0)",
             font=dict(size=12, color="#334155"),
             itemclick="toggle",
@@ -646,22 +521,19 @@ def build_main_chart(
         col=1,
     )
 
-    if show_drawdown:
-        fig.update_yaxes(
-            title_text="回撤",
-            title_font=dict(color="#475569", size=12),
-            tickfont=dict(color="#64748B", size=11),
-            tickformat=".0%",
-            showgrid=True,
-            gridcolor="rgba(203, 213, 225, 0.35)",
-            zeroline=True,
-            zerolinecolor="rgba(148, 163, 184, 0.45)",
-            row=2,
-            col=1,
-        )
-        fig.update_xaxes(title_text="", row=2, col=1)
-    else:
-        fig.update_xaxes(title_text="", row=1, col=1)
+    fig.update_yaxes(
+        title_text="回撤",
+        title_font=dict(color="#475569", size=12),
+        tickfont=dict(color="#64748B", size=11),
+        tickformat=".0%",
+        showgrid=True,
+        gridcolor="rgba(203, 213, 225, 0.35)",
+        zeroline=True,
+        zerolinecolor="rgba(148, 163, 184, 0.45)",
+        row=2,
+        col=1,
+    )
+    fig.update_xaxes(title_text="", row=2, col=1)
 
     return fig
 
@@ -931,7 +803,7 @@ for k in active_keys:
         kind_label="策略" if entry.kind == "strategy" else "真实行情",
         color=color,
         dash="solid",
-        width=2.6 if entry.kind == "strategy" else 2.2,
+        width=1.4 if entry.kind == "strategy" else 1.2,
         is_partial=s_win.index[0].date() > start_date + timedelta(days=5),
         actual_start=s_win.index[0].date(),
     )
@@ -949,8 +821,8 @@ if enable_synth:
             name=synth_name,
             kind_label="合成杠杆",
             color=_assign_color(synth_name, "合成", 0),
-            dash="dash",
-            width=2.2,
+            dash="solid",
+            width=1.2,
             is_partial=base_win.index[0].date() > start_date + timedelta(days=5),
             actual_start=base_win.index[0].date(),
             wiped_out=wipe_dt is not None,
@@ -966,31 +838,6 @@ nav_df = pd.concat(series_list, axis=1).sort_index().dropna(how="all")
 
 # --- Hero Chart Card ---
 with st.container(border=True):
-    c_bar1, c_bar2, c_bar3, c_bar4, c_bar5 = st.columns([1.4, 1.6, 0.9, 0.9, 0.95])
-    with c_bar1:
-        scale_mode = st.radio(
-            "坐标",
-            options=["线性", "对数"],
-            index=0,
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-        use_log_scale = scale_mode == "对数"
-    with c_bar2:
-        focus_curve = st.selectbox(
-            "聚光灯高亮",
-            options=["全部均衡显示"] + list(nav_df.columns),
-            index=0,
-            label_visibility="collapsed",
-            help="选中某条曲线后，其余曲线自动退居半透明背景。",
-        )
-    with c_bar3:
-        show_end_labels = st.checkbox("末端标签", value=True)
-    with c_bar4:
-        show_drawdown = st.checkbox("回撤副图", value=True)
-    with c_bar5:
-        show_regimes = st.checkbox("熊市背景", value=False)
-
     partial_list = [f"**{m.name}** (`{m.actual_start}` 起)" for m in meta_map.values() if m.is_partial]
     if partial_list:
         st.caption(
@@ -1003,16 +850,50 @@ with st.container(border=True):
     if wipe_list:
         st.warning("；".join(wipe_list) + "（已按清零截断）。")
 
-    fig = build_main_chart(
-        nav_df=nav_df,
-        meta_map=meta_map,
-        use_log_scale=use_log_scale,
-        show_drawdown=show_drawdown,
-        show_end_labels=show_end_labels,
-        show_regimes=show_regimes,
-        focus_curve=focus_curve,
+    fig = build_main_chart(nav_df, meta_map)
+    log_fig = build_main_chart(nav_df, meta_map, use_log_scale=True)
+    scale_buttons = []
+    for label, mode_fig in [("线性", fig), ("对数", log_fig)]:
+        scale_buttons.append(
+            dict(
+                label=label,
+                method="update",
+                args=[
+                    dict(
+                        y=[trace.y for trace in mode_fig.data],
+                        name=[trace.name for trace in mode_fig.data],
+                        hovertemplate=[trace.hovertemplate for trace in mode_fig.data],
+                        fill=[trace.fill for trace in mode_fig.data],
+                        fillcolor=[trace.fillcolor for trace in mode_fig.data],
+                    ),
+                    {
+                        "yaxis": {**mode_fig.layout.yaxis.to_plotly_json(), "autorange": True},
+                        "shapes": [shape.to_plotly_json() for shape in mode_fig.layout.shapes],
+                    },
+                ],
+            )
+        )
+    fig.update_layout(
+        margin=dict(l=8, r=18, t=88, b=8),
+        updatemenus=[
+            dict(
+                type="buttons",
+                direction="right",
+                x=0,
+                y=1.02,
+                xanchor="left",
+                yanchor="bottom",
+                active=0,
+                showactive=True,
+                pad=dict(l=0, r=0, t=0, b=0),
+                bgcolor="#F8FAFC",
+                bordercolor="#CBD5E1",
+                font=dict(size=12, color="#334155"),
+                buttons=scale_buttons,
+            )
+        ],
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 # --- Summary Card ---
