@@ -21,12 +21,6 @@
     "#65A30D",
   ];
 
-  const MARKET_REGIMES = [
-    { label: "2008 次贷危机", start: "2007-10-31", end: "2009-03-09", fill: "rgba(225, 29, 72, 0.055)" },
-    { label: "2020 疫情熔断", start: "2020-02-19", end: "2020-03-23", fill: "rgba(217, 119, 6, 0.075)" },
-    { label: "2022 加息熊市", start: "2022-01-03", end: "2022-12-28", fill: "rgba(0, 113, 227, 0.055)" },
-  ];
-
   const state = {
     catalog: [],
     catalogMap: new Map(),
@@ -41,9 +35,6 @@
     preset: "近10年",
     scaleMode: "linear", // "linear" | "log"
     focusCurve: "__ALL__",
-    showEndLabels: true,
-    showDrawdown: true,
-    showRegimes: false,
 
     masterDates: [],
     masterDateToIdx: new Map(),
@@ -88,15 +79,13 @@
     startDateDisplay: document.getElementById("start-date-display"),
     endDateDisplay: document.getElementById("end-date-display"),
     scaleBar: document.getElementById("scale-bar"),
-    toggleEndLabels: document.getElementById("toggle-end-labels"),
-    toggleDrawdown: document.getElementById("toggle-drawdown"),
-    toggleRegimes: document.getElementById("toggle-regimes"),
 
     curveLegendBar: document.getElementById("curve-legend-bar"),
     chartNotices: document.getElementById("chart-notices"),
     chartStage: document.getElementById("chart-stage"),
     mainCanvas: document.getElementById("main-chart-canvas"),
     floatingHud: document.getElementById("floating-hud"),
+    drawdownFloatingHud: document.getElementById("drawdown-floating-hud"),
     navigatorStage: document.getElementById("navigator-stage"),
     navigatorSpanInfo: document.getElementById("navigator-span-info"),
     navCanvas: document.getElementById("navigator-canvas"),
@@ -709,7 +698,9 @@
   function renderMainChart(model) {
     const rect = dom.chartStage.getBoundingClientRect();
     const cssW = Math.max(320, Math.floor(rect.width));
-    const cssH = state.showDrawdown ? 548 : 428;
+    const noticesH = dom.chartNotices ? dom.chartNotices.offsetHeight : 0;
+    const overhead = 280 + (noticesH > 0 ? noticesH + 8 : 0);
+    const cssH = Math.max(360, Math.min(520, window.innerHeight - overhead));
 
     const dpr = window.devicePixelRatio || 1;
     if (dom.mainCanvas.width !== Math.round(cssW * dpr) || dom.mainCanvas.height !== Math.round(cssH * dpr)) {
@@ -725,23 +716,17 @@
 
     const isLog = state.scaleMode === "log";
     const padL = 62;
-    const padR = state.showEndLabels ? 148 : 22;
-    const padT = 14;
-    const padB = 26;
+    const padR = 20;
+    const padT = 10;
+    const padB = 25;
     const plotW = Math.max(80, cssW - padL - padR);
     const totalPlotH = cssH - padT - padB;
 
-    let mainTop = padT;
-    let mainH = totalPlotH;
-    let ddTop = 0;
-    let ddH = 0;
-
-    if (state.showDrawdown) {
-      const gap = 22;
-      mainH = Math.round((totalPlotH - gap) * 0.73);
-      ddTop = mainTop + mainH + gap;
-      ddH = totalPlotH - mainH - gap;
-    }
+    const gap = 20;
+    const mainTop = padT;
+    const mainH = Math.round((totalPlotH - gap) * 0.74);
+    const ddTop = mainTop + mainH + gap;
+    const ddH = totalPlotH - mainH - gap;
 
     const N = model.viewDates.length;
     if (N === 0 || model.curves.length === 0) {
@@ -803,18 +788,15 @@
     };
 
     // Determine Y bounds on drawdown pane
-    let minDd = -0.15;
-    if (state.showDrawdown) {
-      let rawMinDd = 0;
-      for (const c of model.curves) {
-        for (let i = 0; i < N; i++) {
-          const d = c.ddArr[i];
-          if (!Number.isNaN(d) && d < rawMinDd) rawMinDd = d;
-        }
+    let rawMinDd = 0;
+    for (const c of model.curves) {
+      for (let i = 0; i < N; i++) {
+        const d = c.ddArr[i];
+        if (!Number.isNaN(d) && d < rawMinDd) rawMinDd = d;
       }
-      minDd = Math.min(-0.08, rawMinDd * 1.08);
-      minDd = Math.max(-1.02, minDd);
     }
+    let minDd = Math.min(-0.08, rawMinDd * 1.08);
+    minDd = Math.max(-1.02, minDd);
     const yOfDd = (ddVal) => ddTop + ((0.02 - ddVal) / (0.02 - minDd)) * ddH;
 
     mainLayout = {
@@ -836,34 +818,7 @@
       yOfDd,
     };
 
-    // 1. Regime Shaded Bands
-    if (state.showRegimes) {
-      const wStart = model.viewDates[0];
-      const wEnd = model.viewDates[N - 1];
-      for (const reg of MARKET_REGIMES) {
-        const ovStart = reg.start > wStart ? reg.start : wStart;
-        const ovEnd = reg.end < wEnd ? reg.end : wEnd;
-        if (ovStart < ovEnd) {
-          const iStart = lowerBound(model.viewDates, ovStart);
-          const iEnd = Math.max(iStart, upperBound(model.viewDates, ovEnd) - 1);
-          const rx1 = xOfIdx(iStart);
-          const rx2 = Math.max(rx1 + 2, xOfIdx(iEnd));
-          ctx.fillStyle = reg.fill;
-          ctx.fillRect(rx1, mainTop, rx2 - rx1, mainH);
-          if (state.showDrawdown) {
-            ctx.fillRect(rx1, ddTop, rx2 - rx1, ddH);
-          }
-          if (rx2 - rx1 > 36) {
-            ctx.fillStyle = "#6E6E73";
-            ctx.font = '500 10.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-            ctx.textAlign = "left";
-            ctx.fillText(reg.label, rx1 + 5, mainTop + 13);
-          }
-        }
-      }
-    }
-
-    // 2. Horizontal Grid & Y-Axis Ticks (Main Pane)
+    // 1. Horizontal Grid & Y-Axis Ticks (Main Pane)
     ctx.font = '500 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif';
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
@@ -929,32 +884,30 @@
       ctx.setLineDash([]);
     }
 
-    // 3. Drawdown Grid & Y-Axis Ticks
-    if (state.showDrawdown) {
-      const ddTicks = computeNiceLinearTicks(minDd, 0, 3);
-      for (const dv of ddTicks) {
-        const py = yOfDd(dv);
-        if (py < ddTop - 2 || py > ddTop + ddH + 2) continue;
-        ctx.strokeStyle = Math.abs(dv) < 1e-9 ? "rgba(110, 110, 115, 0.35)" : "rgba(0, 0, 0, 0.05)";
-        ctx.lineWidth = 1;
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        ctx.moveTo(padL, py);
-        ctx.lineTo(padL + plotW, py);
-        ctx.stroke();
-
-        ctx.fillStyle = "#86868B";
-        ctx.textAlign = "right";
-        ctx.fillText(`${(dv * 100).toFixed(0)}%`, padL - 8, py);
-      }
+    // 2. Drawdown Grid & Y-Axis Ticks
+    const ddTicks = computeNiceLinearTicks(minDd, 0, 3);
+    for (const dv of ddTicks) {
+      const py = yOfDd(dv);
+      if (py < ddTop - 2 || py > ddTop + ddH + 2) continue;
+      ctx.strokeStyle = Math.abs(dv) < 1e-9 ? "rgba(110, 110, 115, 0.35)" : "rgba(0, 0, 0, 0.05)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(padL, py);
+      ctx.lineTo(padL + plotW, py);
+      ctx.stroke();
 
       ctx.fillStyle = "#86868B";
-      ctx.font = '600 10.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-      ctx.textAlign = "left";
-      ctx.fillText("水下回撤", padL + 4, ddTop - 9);
+      ctx.textAlign = "right";
+      ctx.fillText(`${(dv * 100).toFixed(0)}%`, padL - 8, py);
     }
 
-    // 4. Sort curves so spotlighted curve draws on top
+    ctx.fillStyle = "#86868B";
+    ctx.font = '600 10.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    ctx.textAlign = "left";
+    ctx.fillText("水下回撤", padL + 4, ddTop - 9);
+
+    // 3. Sort curves so spotlighted curve draws on top
     const orderedCurves = [...model.curves].sort((a, b) => {
       const aFocus = state.focusCurve === "__ALL__" || state.focusCurve === a.name ? 1 : 0;
       const bFocus = state.focusCurve === "__ALL__" || state.focusCurve === b.name ? 1 : 0;
@@ -964,7 +917,7 @@
     // Clip to plot area for curves
     ctx.save();
     ctx.beginPath();
-    ctx.rect(padL, mainTop, plotW, state.showDrawdown ? ddTop + ddH - mainTop : mainH);
+    ctx.rect(padL, mainTop, plotW, ddTop + ddH - mainTop);
     ctx.clip();
 
     for (const c of orderedCurves) {
@@ -1040,70 +993,68 @@
       ctx.restore();
 
       // Drawdown curve
-      if (state.showDrawdown) {
-        const fillDd =
-          isFocused &&
-          (state.focusCurve === c.name ||
-            (state.focusCurve === "__ALL__" && c.rawKey === "QQQ"));
+      const fillDd =
+        isFocused &&
+        (state.focusCurve === c.name ||
+          (state.focusCurve === "__ALL__" && c.rawKey === "QQQ"));
 
-        if (fillDd) {
-          const topZeroY = yOfDd(0);
-          ctx.beginPath();
-          let started = false;
-          let lastPx = null;
-          for (let i = 0; i < N; i++) {
-            const d = c.ddArr[i];
-            if (Number.isNaN(d)) continue;
-            const px = xOfIdx(i);
-            const py = yOfDd(d);
-            if (!started) {
-              ctx.moveTo(px, topZeroY);
-              ctx.lineTo(px, py);
-              started = true;
-            } else {
-              ctx.lineTo(px, py);
-            }
-            lastPx = px;
-          }
-          if (started && lastPx !== null) {
-            ctx.lineTo(lastPx, topZeroY);
-            ctx.closePath();
-            ctx.fillStyle = hexToRgba(c.color, 0.085);
-            ctx.fill();
-          }
-        }
-
-        ctx.save();
-        ctx.globalAlpha = alpha;
-        ctx.strokeStyle = c.color;
-        ctx.lineWidth = Math.max(1.15, strokeW - 0.55);
-        ctx.lineJoin = "round";
-        ctx.setLineDash(c.dash);
+      if (fillDd) {
+        const topZeroY = yOfDd(0);
         ctx.beginPath();
-        let ddPen = false;
+        let started = false;
+        let lastPx = null;
         for (let i = 0; i < N; i++) {
           const d = c.ddArr[i];
-          if (Number.isNaN(d)) {
-            ddPen = false;
-            continue;
-          }
+          if (Number.isNaN(d)) continue;
           const px = xOfIdx(i);
           const py = yOfDd(d);
-          if (!ddPen) {
-            ctx.moveTo(px, py);
-            ddPen = true;
+          if (!started) {
+            ctx.moveTo(px, topZeroY);
+            ctx.lineTo(px, py);
+            started = true;
           } else {
             ctx.lineTo(px, py);
           }
+          lastPx = px;
         }
-        ctx.stroke();
-        ctx.restore();
+        if (started && lastPx !== null) {
+          ctx.lineTo(lastPx, topZeroY);
+          ctx.closePath();
+          ctx.fillStyle = hexToRgba(c.color, 0.085);
+          ctx.fill();
+        }
       }
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = c.color;
+      ctx.lineWidth = Math.max(1.15, strokeW - 0.55);
+      ctx.lineJoin = "round";
+      ctx.setLineDash(c.dash);
+      ctx.beginPath();
+      let ddPen = false;
+      for (let i = 0; i < N; i++) {
+        const d = c.ddArr[i];
+        if (Number.isNaN(d)) {
+          ddPen = false;
+          continue;
+        }
+        const px = xOfIdx(i);
+        const py = yOfDd(d);
+        if (!ddPen) {
+          ctx.moveTo(px, py);
+          ddPen = true;
+        } else {
+          ctx.lineTo(px, py);
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
     }
     ctx.restore();
 
-    // 5. X-Axis Date Labels
-    const xAxisY = (state.showDrawdown ? ddTop + ddH : mainTop + mainH) + 15;
+    // 4. X-Axis Date Labels
+    const xAxisY = ddTop + ddH + 14;
     const xTicks = computeTimeTicks(model.viewDates, plotW);
     ctx.font = '500 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif';
     ctx.fillStyle = "#86868B";
@@ -1114,91 +1065,7 @@
       ctx.fillText(tk.label, px, xAxisY);
     }
 
-    // 6. Anti-Collision End Labels in Right Gutter
-    if (state.showEndLabels) {
-      const items = [];
-      for (const c of model.curves) {
-        if (c.lastValidIdx < 0) continue;
-        const lastNav = c.navArr[c.lastValidIdx];
-        if (Number.isNaN(lastNav) || (isLog && lastNav <= 0)) continue;
-        const anchorX = xOfIdx(c.lastValidIdx);
-        const anchorY = yOfNav(lastNav);
-        const valText = isLog ? formatMult(lastNav, 2) : formatPct(lastNav - 1.0, 1);
-        const shortName = c.name.length > 12 ? `${c.name.slice(0, 11)}…` : c.name;
-        const isFocused = state.focusCurve === "__ALL__" || state.focusCurve === c.name;
-        items.push({
-          text: `${shortName} ${valText}`,
-          anchorX,
-          anchorY,
-          y: anchorY,
-          color: c.color,
-          dimmed: !isFocused,
-        });
-      }
-
-      const minGap = 21;
-      items.sort((a, b) => a.y - b.y);
-      for (let i = 1; i < items.length; i++) {
-        if (items[i].y - items[i - 1].y < minGap) {
-          items[i].y = items[i - 1].y + minGap;
-        }
-      }
-      const bottomLimit = mainTop + mainH - 8;
-      if (items.length > 0 && items[items.length - 1].y > bottomLimit) {
-        const shift = items[items.length - 1].y - bottomLimit;
-        for (const it of items) it.y -= shift;
-        if (items[0].y < mainTop + 8) {
-          items[0].y = mainTop + 8;
-          for (let i = 1; i < items.length; i++) {
-            if (items[i].y - items[i - 1].y < minGap) {
-              items[i].y = items[i - 1].y + minGap;
-            }
-          }
-        }
-      }
-
-      const pillX = padL + plotW + 10;
-      const maxPillW = padR - 14;
-      ctx.font = '600 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif';
-
-      for (const it of items) {
-        ctx.save();
-        ctx.globalAlpha = it.dimmed ? 0.28 : 0.98;
-
-        // Delicate connector line
-        ctx.strokeStyle = hexToRgba(it.color, 0.45);
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(it.anchorX, it.anchorY);
-        ctx.lineTo(pillX - 3, it.y);
-        ctx.stroke();
-
-        // Anchor dot
-        ctx.fillStyle = it.color;
-        ctx.beginPath();
-        ctx.arc(it.anchorX, it.anchorY, 2.6, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Badge pill
-        const textW = Math.min(maxPillW - 12, ctx.measureText(it.text).width);
-        const boxW = textW + 12;
-        const boxH = 19;
-        drawRoundedRect(ctx, pillX, it.y - boxH / 2, boxW, boxH, 6);
-        ctx.fillStyle = hexToRgba(it.color, 0.085);
-        ctx.fill();
-        ctx.strokeStyle = hexToRgba(it.color, 0.28);
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        ctx.fillStyle = it.color;
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        ctx.fillText(it.text, pillX + 6, it.y + 0.5, maxPillW - 12);
-        ctx.restore();
-      }
-    }
-
-    // 7. Shift+Drag Measurement Ruler Overlay
+    // 5. Shift+Drag Measurement Ruler Overlay
     if (state.measureRange) {
       const mStart = Math.min(state.measureRange.startIdx, state.measureRange.endIdx);
       const mEnd = Math.max(state.measureRange.startIdx, state.measureRange.endIdx);
@@ -1254,11 +1121,11 @@
       }
     }
 
-    // 8. Interactive Crosshair & Hover Dots
+    // 6. Interactive Crosshair & Hover Dots
     if (state.hoverIdx !== null && state.hoverIdx >= 0 && state.hoverIdx < N) {
       const hIdx = state.hoverIdx;
       const hx = xOfIdx(hIdx);
-      const bottomY = state.showDrawdown ? ddTop + ddH : mainTop + mainH;
+      const bottomY = ddTop + ddH;
 
       ctx.save();
       ctx.strokeStyle = "rgba(0, 113, 227, 0.42)";
@@ -1285,15 +1152,17 @@
           ctx.arc(hx, hy, 3.4, 0, Math.PI * 2);
           ctx.fill();
         }
-        if (state.showDrawdown) {
-          const dd = c.ddArr[hIdx];
-          if (!Number.isNaN(dd)) {
-            const ddy = yOfDd(dd);
-            ctx.fillStyle = c.color;
-            ctx.beginPath();
-            ctx.arc(hx, ddy, 2.8, 0, Math.PI * 2);
-            ctx.fill();
-          }
+        const dd = c.ddArr[hIdx];
+        if (!Number.isNaN(dd)) {
+          const ddy = yOfDd(dd);
+          ctx.fillStyle = "#FFFFFF";
+          ctx.beginPath();
+          ctx.arc(hx, ddy, 4.2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = c.color;
+          ctx.beginPath();
+          ctx.arc(hx, ddy, 2.7, 0, Math.PI * 2);
+          ctx.fill();
         }
       }
 
@@ -1311,68 +1180,123 @@
       ctx.fillText(dateStr, dx + dw / 2, bottomY + 14.5);
       ctx.restore();
 
-      updateFloatingHud(model, hIdx, hx, padL, plotW);
+      updateFloatingHud(model, hIdx, hx, padL, plotW, mainTop, mainH, ddTop, ddH);
     } else {
       dom.floatingHud.classList.add("hidden");
+      dom.drawdownFloatingHud.classList.add("hidden");
     }
 
     ctx.restore();
   }
 
-  function updateFloatingHud(model, hIdx, hx, padL, plotW) {
+  function updateFloatingHud(model, hIdx, hx, padL, plotW, mainTop, mainH, ddTop, ddH) {
     if (state.measureRange) {
       dom.floatingHud.classList.add("hidden");
+      dom.drawdownFloatingHud.classList.add("hidden");
       return;
     }
     const dateStr = model.viewDates[hIdx];
     const isLog = state.scaleMode === "log";
     const rows = [];
+    const ddRows = [];
 
     for (const c of model.curves) {
       const nav = c.navArr[hIdx];
-      if (Number.isNaN(nav)) continue;
+      if (!Number.isNaN(nav)) {
+        rows.push({
+          name: c.name,
+          color: c.color,
+          nav,
+          valTxt: isLog ? formatMult(nav, 2) : formatPct(nav - 1.0, 2),
+        });
+      }
       const dd = c.ddArr[hIdx];
-      rows.push({
-        name: c.name,
-        color: c.color,
-        nav,
-        valTxt: isLog ? formatMult(nav, 2) : formatPct(nav - 1.0, 2),
-        ddTxt: !Number.isNaN(dd) ? formatPct(dd, 1, false) : "",
-      });
+      if (!Number.isNaN(dd)) {
+        ddRows.push({
+          name: c.name,
+          color: c.color,
+          dd,
+          ddTxt: formatPct(dd, 2, false),
+        });
+      }
     }
 
-    if (rows.length === 0) {
+    if (rows.length === 0 && ddRows.length === 0) {
       dom.floatingHud.classList.add("hidden");
+      dom.drawdownFloatingHud.classList.add("hidden");
       return;
     }
 
     rows.sort((a, b) => b.nav - a.nav);
+    ddRows.sort((a, b) => b.dd - a.dd);
 
-    let html = `<div class="hud-date"><span>${dateStr}</span><span>${isLog ? "净值倍数 / 回撤" : "累计收益 / 回撤"}</span></div><div class="hud-rows">`;
-    for (const r of rows) {
-      html += `
-        <div class="hud-row">
-          <div class="hud-row-left">
-            <span class="hud-dot" style="background:${r.color}"></span>
-            <span class="hud-label">${r.name}</span>
+    if (rows.length > 0) {
+      let html = `<div class="hud-date"><span>${dateStr}</span><span>${isLog ? "净值倍数" : "累计收益"}</span></div><div class="hud-rows">`;
+      for (const r of rows) {
+        html += `
+          <div class="hud-row">
+            <div class="hud-row-left">
+              <span class="hud-dot" style="background:${r.color}"></span>
+              <span class="hud-label">${r.name}</span>
+            </div>
+            <div class="hud-metrics">
+              <span class="hud-main-val">${r.valTxt}</span>
+            </div>
           </div>
-          <div class="hud-metrics">
-            <span class="hud-main-val">${r.valTxt}</span>
-            ${state.showDrawdown && r.ddTxt ? `<span class="hud-dd-val">${r.ddTxt}</span>` : ""}
-          </div>
-        </div>
-      `;
+        `;
+      }
+      html += `</div>`;
+      dom.floatingHud.innerHTML = html;
+      dom.floatingHud.classList.remove("hidden");
+    } else {
+      dom.floatingHud.classList.add("hidden");
     }
-    html += `</div>`;
-    dom.floatingHud.innerHTML = html;
-    dom.floatingHud.classList.remove("hidden");
 
-    const hudW = dom.floatingHud.offsetWidth || 230;
-    let leftPos = hx + 16;
-    if (leftPos + hudW > padL + plotW - 8) {
-      leftPos = Math.max(padL + 8, hx - hudW - 16);
+    if (ddRows.length > 0) {
+      let ddHtml = `<div class="hud-date"><span>${dateStr}</span><span>水下回撤</span></div><div class="hud-rows">`;
+      for (const r of ddRows) {
+        ddHtml += `
+          <div class="hud-row">
+            <div class="hud-row-left">
+              <span class="hud-dot" style="background:${r.color}"></span>
+              <span class="hud-label">${r.name}</span>
+            </div>
+            <div class="hud-metrics">
+              <span class="hud-main-val">${r.ddTxt}</span>
+            </div>
+          </div>
+        `;
+      }
+      ddHtml += `</div>`;
+      dom.drawdownFloatingHud.innerHTML = ddHtml;
+      dom.drawdownFloatingHud.classList.remove("hidden");
+    } else {
+      dom.drawdownFloatingHud.classList.add("hidden");
     }
-    dom.floatingHud.style.left = `${leftPos}px`;
+
+    const mainHudW = rows.length > 0 ? dom.floatingHud.offsetWidth || 215 : 0;
+    const ddHudW = ddRows.length > 0 ? dom.drawdownFloatingHud.offsetWidth || 205 : 0;
+    const maxHudW = Math.max(mainHudW, ddHudW);
+    const flipLeft = hx + 16 + maxHudW > padL + plotW - 8;
+
+    let mainHudBottom = mainTop;
+    if (rows.length > 0) {
+      const mainLeft = flipLeft ? Math.max(padL + 8, hx - mainHudW - 16) : hx + 16;
+      const mainHudTop = mainTop + 4;
+      dom.floatingHud.style.left = `${mainLeft}px`;
+      dom.floatingHud.style.top = `${mainHudTop}px`;
+      mainHudBottom = mainHudTop + (dom.floatingHud.offsetHeight || 0);
+    }
+
+    if (ddRows.length > 0) {
+      const ddLeft = flipLeft ? Math.max(padL + 8, hx - ddHudW - 16) : hx + 16;
+      const ddHudH = dom.drawdownFloatingHud.offsetHeight || 0;
+      const idealTop = ddTop + 4;
+      const maxTop = ddTop + ddH - ddHudH - 2;
+      const ddHudTop = Math.max(mainHudBottom + 8, Math.min(idealTop, maxTop));
+      dom.drawdownFloatingHud.style.left = `${ddLeft}px`;
+      dom.drawdownFloatingHud.style.top = `${ddHudTop}px`;
+    }
   }
 
   // --- TradingView-Style Bottom Timeline Ruler Renderer ---
@@ -2005,9 +1929,7 @@
 
     dom.mainCanvas.setPointerCapture(e.pointerId);
     const clickedLocalIdx = mainLayout.idxOfX(x);
-    const bottomPlotY = state.showDrawdown
-      ? mainLayout.ddTop + mainLayout.ddH
-      : mainLayout.mainTop + mainLayout.mainH;
+    const bottomPlotY = mainLayout.ddTop + mainLayout.ddH;
 
     if (y >= bottomPlotY - 2) {
       // TradingView X-axis drag to zoom
@@ -2078,9 +2000,7 @@
       return;
     }
 
-    const bottomPlotY = state.showDrawdown
-      ? mainLayout.ddTop + mainLayout.ddH
-      : mainLayout.mainTop + mainLayout.mainH;
+    const bottomPlotY = mainLayout.ddTop + mainLayout.ddH;
     if (x >= mainLayout.padL && x <= mainLayout.padL + mainLayout.plotW && y >= bottomPlotY - 2) {
       dom.mainCanvas.style.cursor = "ew-resize";
     } else {
@@ -2202,24 +2122,6 @@
     dom.scaleBar.querySelectorAll(".seg-btn").forEach((b) => {
       b.classList.toggle("active", b === btn);
     });
-    scheduleRender();
-  });
-
-  dom.toggleEndLabels.addEventListener("click", () => {
-    state.showEndLabels = !state.showEndLabels;
-    dom.toggleEndLabels.classList.toggle("active", state.showEndLabels);
-    scheduleRender();
-  });
-
-  dom.toggleDrawdown.addEventListener("click", () => {
-    state.showDrawdown = !state.showDrawdown;
-    dom.toggleDrawdown.classList.toggle("active", state.showDrawdown);
-    scheduleRender();
-  });
-
-  dom.toggleRegimes.addEventListener("click", () => {
-    state.showRegimes = !state.showRegimes;
-    dom.toggleRegimes.classList.toggle("active", state.showRegimes);
     scheduleRender();
   });
 
@@ -2359,12 +2261,13 @@
     }
   });
 
-  // ResizeObserver for crisp Retina responsive redraw
+  // ResizeObserver & window resize for crisp Retina responsive redraw
   const resizeObserver = new ResizeObserver(() => {
     scheduleRender();
   });
   resizeObserver.observe(dom.chartStage);
   resizeObserver.observe(dom.navigatorStage);
+  window.addEventListener("resize", scheduleRender);
 
   // --- Bootstrap ---
   function ingestCatalogPayload(payload, setDefaults) {

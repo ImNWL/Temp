@@ -15,10 +15,31 @@
 
 ## 启动方式
 
+项目依赖安装在本地虚拟环境 `.venv` 中，请使用 `.venv` 内的 Python 启动（避免直接使用系统或 conda `(base)` 的 `python3` 导致缺少依赖）：
+
+### 直接启动（已存在 `.venv`）
+
 ```bash
 cd 股市讨论/n_qqq_new
+.venv/bin/python app.py
+```
+
+或先激活虚拟环境再启动：
+
+```bash
+cd 股市讨论/n_qqq_new
+source .venv/bin/activate
+python app.py
+```
+
+### 首次初始化环境（如尚未创建 `.venv`）
+
+```bash
+cd 股市讨论/n_qqq_new
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python3 app.py
+python app.py
 ```
 
 默认监听 `http://127.0.0.1:8501`（可通过 `--port` 指定端口，或添加 `--open` 自动打开浏览器）。

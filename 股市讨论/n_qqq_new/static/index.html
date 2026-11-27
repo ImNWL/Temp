@@ -162,12 +162,6 @@
               <button type="button" class="seg-btn active" data-scale="linear">线性</button>
               <button type="button" class="seg-btn" data-scale="log">对数</button>
             </div>
-
-            <div class="pill-toggles">
-              <button type="button" class="chip-toggle active" id="toggle-end-labels">末端标签</button>
-              <button type="button" class="chip-toggle active" id="toggle-drawdown">回撤副图</button>
-              <button type="button" class="chip-toggle" id="toggle-regimes">熊市背景</button>
-            </div>
           </div>
         </div>
 
@@ -181,6 +175,7 @@
         <div class="chart-stage" id="chart-stage">
           <canvas id="main-chart-canvas"></canvas>
           <div class="floating-hud hidden" id="floating-hud"></div>
+          <div class="floating-hud floating-hud-dd hidden" id="drawdown-floating-hud"></div>
         </div>
 
         <!-- TradingView-Style Illuminated Timeline Navigator Ruler -->

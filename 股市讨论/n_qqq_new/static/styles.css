@@ -535,12 +535,12 @@ body {
 .workspace {
   flex: 1;
   min-width: 0;
-  padding: 22px 30px 40px;
+  padding: 12px 28px 36px;
   max-width: 1560px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
 }
 
 /* Header */
@@ -579,7 +579,8 @@ body {
 
 .page-title {
   margin: 0;
-  font-size: 24px;
+  font-size: 22px;
+  line-height: 1.25;
   font-weight: 700;
   letter-spacing: -0.028em;
   color: var(--ink-primary);
@@ -618,10 +619,10 @@ body {
 }
 
 .studio-card {
-  padding: 20px 24px 20px;
+  padding: 14px 22px 14px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
 }
 
 /* Unified Single-Row Control Bar */
@@ -719,44 +720,13 @@ body {
   color: var(--ink-tertiary);
 }
 
-.pill-toggles {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.chip-toggle {
-  height: 30px;
-  padding: 0 11px;
-  border-radius: 9px;
-  border: 1px solid transparent;
-  background: var(--bg-subtle);
-  color: var(--ink-secondary);
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.chip-toggle:hover {
-  color: var(--ink-primary);
-  background: rgba(0, 0, 0, 0.045);
-}
-
-.chip-toggle.active {
-  background: var(--accent-blue-tint);
-  color: var(--accent-blue);
-  font-weight: 600;
-}
-
 /* Editorial Apple Stocks Ticker Readout Strip */
 .editorial-legend {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 18px;
-  padding: 6px 2px 8px;
+  padding: 2px 2px 6px;
   border-bottom: 1px solid var(--border-hairline);
 }
 
@@ -872,6 +842,25 @@ body {
   box-shadow: var(--shadow-hud);
 }
 
+.floating-hud-dd {
+  padding: 8px 13px;
+  border-radius: 12px;
+  min-width: 205px;
+}
+
+.floating-hud-dd .hud-date {
+  margin-bottom: 5px;
+  padding-bottom: 4px;
+}
+
+.floating-hud-dd .hud-rows {
+  gap: 3px;
+}
+
+.floating-hud-dd .hud-row {
+  font-size: 11.5px;
+}
+
 .hud-date {
   font-size: 11px;
   font-weight: 600;
@@ -938,11 +927,11 @@ body {
 
 /* TradingView-Style Bottom Timeline Navigator Ruler */
 .navigator-section {
-  padding-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid var(--border-hairline);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .navigator-header {
