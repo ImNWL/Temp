@@ -64,6 +64,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.logo(
+    """
+    <svg xmlns="http://www.w3.org/2000/svg" width="68" height="20" viewBox="0 0 68 20" role="img" aria-label="策略对比">
+        <title>策略对比</title>
+        <text x="0" y="16" fill="#0F172A" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="16" font-weight="600">策略对比</text>
+    </svg>
+    """.strip(),
+    size="small",
+)
+
 st.markdown(
     """
     <style>
@@ -86,6 +96,9 @@ st.markdown(
         height: 2rem;
         min-height: 2rem;
     }
+    [data-testid="stToolbar"] div:has(> button[data-testid="stExpandSidebarButton"]) {
+        order: -1;
+    }
 
     /* Sidebar subtle separation & polish */
     section[data-testid="stSidebar"] {
@@ -100,22 +113,10 @@ st.markdown(
     .hero-header {
         display: flex;
         align-items: center;
-        justify-content: space-between;
+        justify-content: flex-end;
         flex-wrap: wrap;
         gap: 0.4rem;
         margin-bottom: 0.35rem;
-    }
-    [data-testid="stMarkdownContainer"] h1.hero-title {
-        font-size: 1.05rem;
-        font-weight: 600;
-        color: #0F172A;
-        letter-spacing: -0.02em;
-        margin: 0;
-        padding: 0;
-        line-height: 1.3;
-    }
-    .hero-title span.accent {
-        color: #2563EB;
     }
     .hero-subtitle {
         font-size: 0.875rem;
@@ -732,9 +733,6 @@ active_count = len(active_keys) + (1 if enable_synth else 0)
 st.markdown(
     f"""
     <div class="hero-header">
-        <div>
-            <h1 class="hero-title">策略对比</h1>
-        </div>
         <div class="hero-pill">● 当前对比 {active_count} 条曲线 · 最新数据至 {global_max_date:%Y-%m-%d}</div>
     </div>
     """,
