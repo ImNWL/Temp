@@ -21,14 +21,17 @@ from pydantic import BaseModel
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STOCK_DATA_DIR = APP_DIR.parent / "stockData"
+STRATEGIES_DIR = APP_DIR.parent / "strategies"
 FETCH_SCRIPT_PATH = STOCK_DATA_DIR / "fetch_data.py"
 
 
 @dataclass
 class DatasetEntry:
     key: str
+    label: str
     kind: str  # "market" | "strategy"
     path: Path
+    series: pd.Series
     dates: list[str]
     values: list[float]
 
@@ -40,6 +43,16 @@ class AddTickerRequest(BaseModel):
 class RefreshTickerRequest(BaseModel):
     symbols: list[str]
     full: bool = False
+
+
+class EvaluateStrategiesRequest(BaseModel):
+    keys: list[str]
+    startDate: str | None = None
+    endDate: str | None = None
+
+
+_CSV_CACHE: dict[Path, tuple[int, int, bool, DatasetEntry]] = {}
+_STRATEGY_MOD_CACHE: dict[Path, tuple[int, Any]] = {}
 
 
 def _load_fetcher_module():
@@ -127,66 +140,137 @@ def _parse_csv_series(csv_path: Path, name: str, force_strategy: bool = False) -
 
     date_strs = series.index.strftime("%Y-%m-%d").tolist()
     float_vals = [round(float(v), 6) for v in series.values]
+    label = csv_path.stem if force_strategy else name
     return DatasetEntry(
         key=name,
+        label=label,
         kind=kind,
         path=csv_path,
+        series=series,
         dates=date_strs,
         values=float_vals,
     )
 
 
-def scan_catalog(auto_bootstrap: bool = True) -> dict[str, Any]:
+def _get_cached_csv_entry(csv_path: Path, name: str, force_strategy: bool = False) -> DatasetEntry:
+    st = csv_path.stat()
+    cached = _CSV_CACHE.get(csv_path)
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size and cached[2] == force_strategy:
+        return cached[3]
+    entry = _parse_csv_series(csv_path, name, force_strategy=force_strategy)
+    _CSV_CACHE[csv_path] = (st.st_mtime_ns, st.st_size, force_strategy, entry)
+    return entry
+
+
+def _load_strategy_modules(parse_errors: list[str] | None = None) -> list[Any]:
+    modules: list[Any] = []
+    if not STRATEGIES_DIR.exists():
+        return modules
+
+    for py_path in sorted(STRATEGIES_DIR.glob("*.py")):
+        if py_path.name.startswith("_"):
+            continue
+        try:
+            mtime_ns = py_path.stat().st_mtime_ns
+            cached = _STRATEGY_MOD_CACHE.get(py_path)
+            if cached is not None and cached[0] == mtime_ns:
+                modules.append(cached[1])
+                continue
+
+            mod_name = f"user_strategy_{py_path.stem}"
+            spec = importlib.util.spec_from_file_location(mod_name, py_path)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+            _STRATEGY_MOD_CACHE[py_path] = (mtime_ns, mod)
+            modules.append(mod)
+        except Exception as exc:
+            if parse_errors is not None:
+                parse_errors.append(f"{py_path.name}: {exc}")
+
+    return modules
+
+
+def _scan_csv_catalog() -> tuple[dict[str, DatasetEntry], list[str]]:
     catalog: dict[str, DatasetEntry] = {}
     parse_errors: list[str] = []
+    candidates: list[tuple[Path, bool]] = []
+    if STOCK_DATA_DIR.exists():
+        for p in sorted(STOCK_DATA_DIR.glob("*.csv")):
+            candidates.append((p, False))
+        strat_dir = STOCK_DATA_DIR / "strategies"
+        if strat_dir.exists():
+            for p in sorted(strat_dir.glob("*.csv")):
+                candidates.append((p, True))
 
-    def _scan_once() -> None:
-        catalog.clear()
-        parse_errors.clear()
-        candidates: list[tuple[Path, bool]] = []
-        if STOCK_DATA_DIR.exists():
-            for p in sorted(STOCK_DATA_DIR.glob("*.csv")):
-                candidates.append((p, False))
-            strat_dir = STOCK_DATA_DIR / "strategies"
-            if strat_dir.exists():
-                for p in sorted(strat_dir.glob("*.csv")):
-                    candidates.append((p, True))
+    for csv_path, force_strat in candidates:
+        key = f"strategies/{csv_path.stem}" if force_strat else csv_path.stem
+        try:
+            entry = _get_cached_csv_entry(csv_path, key, force_strategy=force_strat)
+            catalog[key] = entry
+        except Exception as exc:
+            parse_errors.append(f"{csv_path.name}: {exc}")
 
-        for csv_path, force_strat in candidates:
-            key = f"strategies/{csv_path.stem}" if force_strat else csv_path.stem
-            try:
-                entry = _parse_csv_series(csv_path, key, force_strategy=force_strat)
-                catalog[key] = entry
-            except Exception as exc:
-                parse_errors.append(f"{csv_path.name}: {exc}")
+    return catalog, parse_errors
 
-    _scan_once()
+
+def _describe_dynamic_strategies(
+    market_series: dict[str, pd.Series],
+    parse_errors: list[str],
+) -> list[dict[str, Any]]:
+    dynamic_items: list[dict[str, Any]] = []
+    for mod in _load_strategy_modules(parse_errors):
+        py_name = Path(getattr(mod, "__file__", "strategy.py")).name
+        try:
+            desc_fn = getattr(mod, "describe_strategy", None)
+            if callable(desc_fn):
+                payload = desc_fn(market_series)
+                if isinstance(payload, dict) and payload.get("key") and payload.get("dates"):
+                    dynamic_items.append(payload)
+        except Exception as exc:
+            parse_errors.append(f"{py_name}: {exc}")
+    return dynamic_items
+
+
+def scan_catalog(auto_bootstrap: bool = True) -> dict[str, Any]:
+    catalog, parse_errors = _scan_csv_catalog()
     if not catalog and auto_bootstrap:
         try:
             fetcher = _load_fetcher_module()
             fetcher.fetch_symbols(("QQQ", "QLD", "TQQQ"), data_dir=STOCK_DATA_DIR)
-            _scan_once()
+            catalog, parse_errors = _scan_csv_catalog()
         except Exception as exc:
             parse_errors.append(f"自动拉取默认数据失败: {exc}")
 
+    market_series = {
+        entry.key: entry.series
+        for entry in catalog.values()
+        if entry.kind == "market"
+    }
+    dynamic_strategies = _describe_dynamic_strategies(market_series, parse_errors)
+
     priority = ["QQQ", "QLD", "TQQQ"]
     ordered_keys: list[str] = [k for k in priority if k in catalog]
-    ordered_keys.extend(k for k in catalog.keys() if k not in ordered_keys)
+    remaining_keys: list[str] = [k for k in catalog.keys() if k not in ordered_keys]
 
-    items = []
-    for k in ordered_keys:
-        entry = catalog[k]
-        items.append(
-            {
-                "key": entry.key,
-                "kind": entry.kind,
-                "startDate": entry.dates[0],
-                "endDate": entry.dates[-1],
-                "count": len(entry.dates),
-                "dates": entry.dates,
-                "values": entry.values,
-            }
-        )
+    def _entry_to_dict(entry: DatasetEntry) -> dict[str, Any]:
+        return {
+            "key": entry.key,
+            "label": entry.label,
+            "kind": entry.kind,
+            "mode": "static",
+            "startDate": entry.dates[0],
+            "endDate": entry.dates[-1],
+            "count": len(entry.dates),
+            "dates": entry.dates,
+            "values": entry.values,
+        }
+
+    items: list[dict[str, Any]] = [_entry_to_dict(catalog[k]) for k in ordered_keys]
+    items.extend(dynamic_strategies)
+    items.extend(_entry_to_dict(catalog[k]) for k in remaining_keys)
 
     return {
         "items": items,
@@ -201,6 +285,34 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 @app.get("/api/catalog")
 def api_get_catalog() -> dict[str, Any]:
     return scan_catalog(auto_bootstrap=True)
+
+
+@app.post("/api/strategies/evaluate")
+def api_evaluate_strategies(req: EvaluateStrategiesRequest) -> dict[str, Any]:
+    if not req.keys:
+        return {"results": {}}
+
+    catalog, _ = _scan_csv_catalog()
+    market_series = {
+        entry.key: entry.series
+        for entry in catalog.values()
+        if entry.kind == "market"
+    }
+    target_keys = set(req.keys)
+    results: dict[str, Any] = {}
+
+    for mod in _load_strategy_modules():
+        eval_fn = getattr(mod, "evaluate_strategy", None)
+        if not callable(eval_fn):
+            continue
+        mod_key = getattr(mod, "STRATEGY_KEY", None)
+        if mod_key is not None and mod_key not in target_keys:
+            continue
+        res = eval_fn(market_series, req.startDate, req.endDate)
+        if isinstance(res, dict) and res.get("key") in target_keys:
+            results[res["key"]] = res
+
+    return {"results": results}
 
 
 @app.post("/api/tickers/add")

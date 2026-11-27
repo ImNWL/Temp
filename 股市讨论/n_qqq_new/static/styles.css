@@ -947,6 +947,16 @@ body {
   text-overflow: ellipsis;
 }
 
+.hud-holding {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0.5px 4.5px;
+  border-radius: 4px;
+  background: rgba(88, 86, 214, 0.1);
+  color: #5856d6;
+  flex-shrink: 0;
+}
+
 .hud-metrics {
   display: flex;
   align-items: center;

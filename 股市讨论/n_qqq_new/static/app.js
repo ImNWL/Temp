@@ -26,6 +26,8 @@
     catalogMap: new Map(),
     colorByKey: new Map(),
     parseErrors: [],
+    catalogVersion: 0,
+    remoteEvalByKey: new Map(),
 
     selectedKeys: [],
     enableSynth: true,
@@ -100,6 +102,8 @@
   let mainLayout = null;
   let navLayout = null;
   let rafPending = false;
+  let evalInFlight = false;
+  let evalPending = false;
 
   // --- Utilities ---
   function showToast(msg, isError = false) {
@@ -183,7 +187,7 @@
   }
 
   function displayAssetName(item) {
-    return item.kind === "strategy" ? `${item.key} [策略]` : item.key;
+    return item.label || item.key;
   }
 
   function subtractMonthsUTC(dt, months) {
@@ -387,32 +391,116 @@
       if (i1 <= i0) continue;
 
       const name = displayAssetName(entry);
-      const baseVal = entry.values[i0];
       const navArr = new Float64Array(N);
       navArr.fill(NaN);
       const ddArr = new Float64Array(N);
       ddArr.fill(NaN);
+      let holdingArr = null;
+      let switchEventArr = null;
+      const switchPoints = [];
 
       const validDates = [];
       const validNavs = [];
       let peak = -Infinity;
       let lastValidIdx = -1;
 
-      for (let i = i0; i < i1; i++) {
-        const dStr = entry.dates[i];
-        const mIdx = state.masterDateToIdx.get(dStr);
-        if (mIdx === undefined) continue;
-        const localIdx = mIdx - state.winStartIdx;
-        if (localIdx < 0 || localIdx >= N) continue;
+      if (entry.mode === "remote_strategy") {
+        // 纯绘图：直接使用后端 strategies/*.py 针对当前窗口实时计算出的净值、持仓与换仓标记
+        const ev = state.remoteEvalByKey.get(key);
+        const isExact =
+          ev &&
+          ev.version === state.catalogVersion &&
+          ev.winStart === winStartStr &&
+          ev.winEnd === winEndStr;
 
-        const nav = entry.values[i] / baseVal;
-        navArr[localIdx] = nav;
-        if (nav > peak) peak = nav;
-        ddArr[localIdx] = peak > 0 ? nav / peak - 1.0 : 0.0;
+        if (isExact) {
+          holdingArr = new Array(N).fill(null);
+          switchEventArr = new Array(N).fill(null);
+          const evDates = ev.dates || [];
+          const evVals = ev.values || [];
+          const evHoldings = ev.holdings || [];
 
-        validDates.push(dStr);
-        validNavs.push(nav);
-        lastValidIdx = localIdx;
+          for (let j = 0; j < evDates.length; j++) {
+            const dStr = evDates[j];
+            const mIdx = state.masterDateToIdx.get(dStr);
+            if (mIdx === undefined) continue;
+            const localIdx = mIdx - state.winStartIdx;
+            if (localIdx < 0 || localIdx >= N) continue;
+
+            const nav = evVals[j];
+            navArr[localIdx] = nav;
+            if (nav > peak) peak = nav;
+            ddArr[localIdx] = peak > 0 ? nav / peak - 1.0 : -1.0;
+            if (evHoldings[j]) holdingArr[localIdx] = evHoldings[j];
+
+            validDates.push(dStr);
+            validNavs.push(nav);
+            lastValidIdx = localIdx;
+          }
+
+          for (const mk of ev.markers || []) {
+            const mIdx = state.masterDateToIdx.get(mk.date);
+            if (mIdx === undefined) continue;
+            const localIdx = mIdx - state.winStartIdx;
+            if (localIdx < 0 || localIdx >= N) continue;
+            switchPoints.push({
+              localIdx,
+              date: mk.date,
+              direction: mk.direction || "up",
+              color: mk.color || null,
+              tagText: mk.tag || "",
+            });
+            if (mk.hud) {
+              switchEventArr[localIdx] = {
+                color: mk.color || null,
+                text: mk.hud,
+              };
+            }
+          }
+        } else {
+          // 请求返回前的毫秒级过渡占位（避免快速拖动时间轴时线条闪烁）
+          const srcDates = ev && ev.dates && ev.dates.length > 0 ? ev.dates : entry.dates;
+          const srcVals = ev && ev.values && ev.values.length > 0 ? ev.values : entry.values;
+          const s0 = lowerBound(srcDates, winStartStr);
+          const s1 = upperBound(srcDates, winEndStr);
+          if (s1 > s0 && srcVals[s0] > 0) {
+            const baseV = srcVals[s0];
+            for (let i = s0; i < s1; i++) {
+              const dStr = srcDates[i];
+              const mIdx = state.masterDateToIdx.get(dStr);
+              if (mIdx === undefined) continue;
+              const localIdx = mIdx - state.winStartIdx;
+              if (localIdx < 0 || localIdx >= N) continue;
+
+              const nav = srcVals[i] / baseV;
+              navArr[localIdx] = nav;
+              if (nav > peak) peak = nav;
+              ddArr[localIdx] = peak > 0 ? nav / peak - 1.0 : -1.0;
+
+              validDates.push(dStr);
+              validNavs.push(nav);
+              lastValidIdx = localIdx;
+            }
+          }
+        }
+      } else {
+        const baseVal = entry.values[i0];
+        for (let i = i0; i < i1; i++) {
+          const dStr = entry.dates[i];
+          const mIdx = state.masterDateToIdx.get(dStr);
+          if (mIdx === undefined) continue;
+          const localIdx = mIdx - state.winStartIdx;
+          if (localIdx < 0 || localIdx >= N) continue;
+
+          const nav = entry.values[i] / baseVal;
+          navArr[localIdx] = nav;
+          if (nav > peak) peak = nav;
+          ddArr[localIdx] = peak > 0 ? nav / peak - 1.0 : 0.0;
+
+          validDates.push(dStr);
+          validNavs.push(nav);
+          lastValidIdx = localIdx;
+        }
       }
 
       if (validNavs.length === 0) continue;
@@ -433,6 +521,9 @@
         width: entry.kind === "strategy" ? 1.65 : 1.4,
         navArr,
         ddArr,
+        holdingArr,
+        switchEventArr,
+        switchPoints,
         validDates,
         validNavs,
         lastValidIdx,
@@ -446,7 +537,7 @@
       if (i1 > i0) {
         const lev = state.leverage;
         const levLabel = Number.isInteger(lev) ? String(lev) : String(Number(lev.toFixed(2)));
-        const synthName = `${levLabel}x ${state.synthBase} (合成)`;
+        const synthName = `${levLabel}x ${displayAssetName(baseEntry)} (合成)`;
 
         const navArr = new Float64Array(N);
         navArr.fill(NaN);
@@ -1071,6 +1162,79 @@
     }
     ctx.restore();
 
+    // 3.5 Strategy Markers & Callout Pills (Purely Rendered from Backend Strategy Output)
+    for (const c of orderedCurves) {
+      if (!c.switchPoints || c.switchPoints.length === 0) continue;
+      const isFocused = state.focusCurve === "__ALL__" || state.focusCurve === c.name;
+      const showTags = isFocused && c.switchPoints.length <= 28;
+      let lastTagRightX = -Infinity;
+
+      ctx.save();
+      ctx.globalAlpha = isFocused ? 1.0 : 0.18;
+      ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif';
+
+      for (const sp of c.switchPoints) {
+        const nav = c.navArr[sp.localIdx];
+        if (Number.isNaN(nav) || (isLog && nav <= 0)) continue;
+        const px = xOfIdx(sp.localIdx);
+        const py = yOfNav(nav);
+        if (py < mainTop - 2 || py > mainTop + mainH + 2) continue;
+
+        const mColor = sp.color || c.color;
+        const isUp = sp.direction !== "down";
+
+        ctx.beginPath();
+        if (isUp) {
+          ctx.moveTo(px, py - 5.2);
+          ctx.lineTo(px + 4.8, py + 4.0);
+          ctx.lineTo(px - 4.8, py + 4.0);
+        } else {
+          ctx.moveTo(px, py + 5.2);
+          ctx.lineTo(px + 4.8, py - 4.0);
+          ctx.lineTo(px - 4.8, py - 4.0);
+        }
+        ctx.closePath();
+        ctx.lineWidth = 2.2;
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = "#FFFFFF";
+        ctx.stroke();
+        ctx.fillStyle = mColor;
+        ctx.fill();
+
+        if (showTags && sp.tagText) {
+          const tw = ctx.measureText(sp.tagText).width;
+          const boxW = tw + 10;
+          const boxH = 16;
+          let bx = px - boxW / 2;
+          bx = Math.max(padL + 3, Math.min(padL + plotW - boxW - 3, bx));
+
+          if (bx >= lastTagRightX + 6) {
+            let by = isUp ? py + 7 : py - 7 - boxH;
+            if (by + boxH > mainTop + mainH - 2) {
+              by = py - 7 - boxH;
+            }
+            if (by < mainTop + 2) {
+              by = py + 7;
+            }
+
+            drawRoundedRect(ctx, bx, by, boxW, boxH, 4.5);
+            ctx.fillStyle = "rgba(255, 255, 255, 0.90)";
+            ctx.fill();
+            ctx.strokeStyle = hexToRgba(mColor, 0.42);
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.fillStyle = mColor;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(sp.tagText, bx + boxW / 2, by + boxH / 2 + 0.5);
+            lastTagRightX = bx + boxW;
+          }
+        }
+      }
+      ctx.restore();
+    }
+
     // 4. X-Axis Date Labels
     const xAxisY = ddTop + ddH + 14;
     const xTicks = computeTimeTicks(model.viewDates, plotW);
@@ -1220,10 +1384,16 @@
 
     for (const c of model.curves) {
       const nav = c.navArr[hIdx];
+      const holding = c.holdingArr ? c.holdingArr[hIdx] : null;
+      const switchEvt = c.switchEventArr ? c.switchEventArr[hIdx] : null;
+      const badgeTxt = switchEvt ? switchEvt.text : holding;
+      const badgeColor = switchEvt ? switchEvt.color : null;
       if (!Number.isNaN(nav)) {
         rows.push({
           name: c.name,
           color: c.color,
+          badgeTxt,
+          badgeColor,
           nav,
           valTxt: isLog ? formatMult(nav, 2) : formatPct(nav - 1.0, 2),
         });
@@ -1233,6 +1403,8 @@
         ddRows.push({
           name: c.name,
           color: c.color,
+          badgeTxt,
+          badgeColor,
           dd,
           ddTxt: formatPct(dd, 2, false),
         });
@@ -1248,6 +1420,14 @@
     rows.sort((a, b) => b.nav - a.nav);
     ddRows.sort((a, b) => b.dd - a.dd);
 
+    const renderBadge = (r) => {
+      if (!r.badgeTxt) return "";
+      const style = r.badgeColor
+        ? ` style="background:${hexToRgba(r.badgeColor, 0.13)};color:${r.badgeColor}"`
+        : "";
+      return `<span class="hud-holding"${style}>${r.badgeTxt}</span>`;
+    };
+
     if (rows.length > 0) {
       let html = `<div class="hud-date"><span>${dateStr}</span><span>${isLog ? "净值倍数" : "累计收益"}</span></div><div class="hud-rows">`;
       for (const r of rows) {
@@ -1256,6 +1436,7 @@
             <div class="hud-row-left">
               <span class="hud-dot" style="background:${r.color}"></span>
               <span class="hud-label">${r.name}</span>
+              ${renderBadge(r)}
             </div>
             <div class="hud-metrics">
               <span class="hud-main-val">${r.valTxt}</span>
@@ -1278,6 +1459,7 @@
             <div class="hud-row-left">
               <span class="hud-dot" style="background:${r.color}"></span>
               <span class="hud-label">${r.name}</span>
+              ${renderBadge(r)}
             </div>
             <div class="hud-metrics">
               <span class="hud-main-val">${r.ddTxt}</span>
@@ -1619,10 +1801,13 @@
       row.className = `asset-item${isSelected ? " selected" : ""}`;
       row.setAttribute("role", "option");
       row.setAttribute("aria-selected", String(isSelected));
+      if (item.description) {
+        row.title = item.description;
+      }
       row.innerHTML = `
         <div class="asset-item-left">
           <span class="asset-dot" style="${isSelected ? `background:${color}` : ""}"></span>
-          <span class="asset-name">${item.key}</span>
+          <span class="asset-name">${displayAssetName(item)}</span>
           ${item.kind === "strategy" ? '<span class="asset-kind-tag">策略</span>' : ""}
         </div>
         <span class="asset-check">
@@ -1809,11 +1994,70 @@
       .join("");
   }
 
+  async function ensureRemoteStrategiesEvaluated() {
+    const remoteKeys = state.selectedKeys.filter(
+      (k) => state.catalogMap.get(k)?.mode === "remote_strategy"
+    );
+    if (remoteKeys.length === 0 || state.masterDates.length === 0) return;
+
+    const winStart = state.masterDates[state.winStartIdx];
+    const winEnd = state.masterDates[state.winEndIdx];
+    const ver = state.catalogVersion;
+
+    const missingKeys = remoteKeys.filter((k) => {
+      const ev = state.remoteEvalByKey.get(k);
+      return !ev || ev.version !== ver || ev.winStart !== winStart || ev.winEnd !== winEnd;
+    });
+    if (missingKeys.length === 0) return;
+
+    if (evalInFlight) {
+      evalPending = true;
+      return;
+    }
+
+    evalInFlight = true;
+    try {
+      const resp = await fetch("/api/strategies/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keys: missingKeys,
+          startDate: winStart,
+          endDate: winEnd,
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const results = data.results || {};
+        for (const k of missingKeys) {
+          if (results[k]) {
+            state.remoteEvalByKey.set(k, {
+              version: ver,
+              winStart,
+              winEnd,
+              ...results[k],
+            });
+          }
+        }
+        scheduleRender();
+      }
+    } catch (_) {
+      // 网络异常时静默保留占位曲线
+    } finally {
+      evalInFlight = false;
+      if (evalPending) {
+        evalPending = false;
+        ensureRemoteStrategiesEvaluated();
+      }
+    }
+  }
+
   function scheduleRender() {
     if (rafPending) return;
     rafPending = true;
     requestAnimationFrame(() => {
       rafPending = false;
+      ensureRemoteStrategiesEvaluated();
       currentModel = computeWindowModel();
       renderTopStatusAndLegend(currentModel);
       renderMainChart(currentModel);
@@ -2317,10 +2561,16 @@
     state.catalog = payload.items || [];
     state.parseErrors = payload.parseErrors || [];
     state.catalogMap = new Map(state.catalog.map((it) => [it.key, it]));
+    state.catalogVersion += 1;
+    state.remoteEvalByKey.clear();
     assignCatalogColors();
 
     if (setDefaults) {
-      const defaults = ["QQQ", "QLD", "TQQQ"].filter((k) => state.catalogMap.has(k));
+      const baseDefaults = ["QQQ", "QLD", "TQQQ"].filter((k) => state.catalogMap.has(k));
+      const dynKeys = state.catalog
+        .filter((it) => it.mode === "remote_strategy")
+        .map((it) => it.key);
+      const defaults = [...baseDefaults, ...dynKeys];
       state.selectedKeys =
         defaults.length > 0
           ? defaults
