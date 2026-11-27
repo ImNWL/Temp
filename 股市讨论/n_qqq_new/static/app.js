@@ -2,7 +2,7 @@
   "use strict";
 
   const TRADING_DAYS_PER_YEAR = 252;
-  const MIN_WINDOW_BARS = 5;
+  const MIN_WINDOW_BARS = 3;
 
   const FIXED_COLORS = {
     QQQ: "#0071E3",
@@ -186,13 +186,30 @@
     return item.kind === "strategy" ? `${item.key} [策略]` : item.key;
   }
 
+  function subtractMonthsUTC(dt, months) {
+    const totalMonths = dt.getUTCFullYear() * 12 + dt.getUTCMonth() - months;
+    const targetYear = Math.floor(totalMonths / 12);
+    const targetMonth = ((totalMonths % 12) + 12) % 12;
+    const lastDayOfMonth = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = Math.min(dt.getUTCDate(), lastDayOfMonth);
+    return Date.UTC(targetYear, targetMonth, targetDay);
+  }
+
   function computePresetDateStrings(preset, minDateStr, maxDateStr) {
     const minMs = parseDateUTC(minDateStr);
     const maxMs = parseDateUTC(maxDateStr);
     const maxDt = new Date(maxMs);
     let sMs = minMs;
 
-    if (preset === "YTD") {
+    if (preset === "近1周") {
+      sMs = Math.max(minMs, maxMs - 7 * 86400000);
+    } else if (preset === "近1月") {
+      sMs = Math.max(minMs, subtractMonthsUTC(maxDt, 1));
+    } else if (preset === "近3月") {
+      sMs = Math.max(minMs, subtractMonthsUTC(maxDt, 3));
+    } else if (preset === "近6月") {
+      sMs = Math.max(minMs, subtractMonthsUTC(maxDt, 6));
+    } else if (preset === "YTD") {
       sMs = Math.max(minMs, Date.UTC(maxDt.getUTCFullYear(), 0, 1));
     } else if (preset === "近1年") {
       sMs = Math.max(minMs, maxMs - 365 * 86400000);
@@ -413,7 +430,7 @@
         kindType: entry.kind,
         color: state.colorByKey.get(key) || "#0071E3",
         dash: [],
-        width: entry.kind === "strategy" ? 2.5 : 2.15,
+        width: entry.kind === "strategy" ? 1.65 : 1.4,
         navArr,
         ddArr,
         validDates,
@@ -489,8 +506,8 @@
             kindLabel: "合成杠杆",
             kindType: "synth",
             color: SYNTH_COLOR,
-            dash: [6, 4],
-            width: 2.15,
+            dash: [5, 3.5],
+            width: 1.4,
             navArr,
             ddArr,
             validDates,
@@ -698,8 +715,9 @@
   function renderMainChart(model) {
     const rect = dom.chartStage.getBoundingClientRect();
     const cssW = Math.max(320, Math.floor(rect.width));
+    const legendH = dom.curveLegendBar ? dom.curveLegendBar.offsetHeight : 42;
     const noticesH = dom.chartNotices ? dom.chartNotices.offsetHeight : 0;
-    const overhead = 280 + (noticesH > 0 ? noticesH + 8 : 0);
+    const overhead = 252 + legendH + (noticesH > 0 ? noticesH + 8 : 0);
     const cssH = Math.max(360, Math.min(520, window.innerHeight - overhead));
 
     const dpr = window.devicePixelRatio || 1;
@@ -924,7 +942,7 @@
       const isFocused = state.focusCurve === "__ALL__" || state.focusCurve === c.name;
       const alpha = isFocused ? 1.0 : 0.16;
       const strokeW =
-        state.focusCurve === c.name ? c.width + 0.85 : isFocused ? c.width : 1.25;
+        state.focusCurve === c.name ? c.width + 0.55 : isFocused ? c.width : 1.0;
 
       // Optional subtle gradient breath fill on main pane
       const useSubtleFill =
@@ -1028,7 +1046,7 @@
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.strokeStyle = c.color;
-      ctx.lineWidth = Math.max(1.15, strokeW - 0.55);
+      ctx.lineWidth = Math.max(0.95, strokeW - 0.3);
       ctx.lineJoin = "round";
       ctx.setLineDash(c.dash);
       ctx.beginPath();
@@ -1145,11 +1163,11 @@
           const hy = yOfNav(nav);
           ctx.fillStyle = "#FFFFFF";
           ctx.beginPath();
-          ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+          ctx.arc(hx, hy, 4.2, 0, Math.PI * 2);
           ctx.fill();
           ctx.fillStyle = c.color;
           ctx.beginPath();
-          ctx.arc(hx, hy, 3.4, 0, Math.PI * 2);
+          ctx.arc(hx, hy, 2.8, 0, Math.PI * 2);
           ctx.fill();
         }
         const dd = c.ddArr[hIdx];
@@ -1157,11 +1175,11 @@
           const ddy = yOfDd(dd);
           ctx.fillStyle = "#FFFFFF";
           ctx.beginPath();
-          ctx.arc(hx, ddy, 4.2, 0, Math.PI * 2);
+          ctx.arc(hx, ddy, 3.6, 0, Math.PI * 2);
           ctx.fill();
           ctx.fillStyle = c.color;
           ctx.beginPath();
-          ctx.arc(hx, ddy, 2.7, 0, Math.PI * 2);
+          ctx.arc(hx, ddy, 2.3, 0, Math.PI * 2);
           ctx.fill();
         }
       }
@@ -1326,8 +1344,14 @@
     if (dom.navigatorSpanInfo) {
       const sD = state.masterDates[state.winStartIdx];
       const eD = state.masterDates[state.winEndIdx];
-      const yrs = (daysBetween(sD, eD) / 365.25).toFixed(1);
-      dom.navigatorSpanInfo.textContent = `${sD} — ${eD} (${yrs} 年) · 拖动边缘选时段 / 按住选区左右滑动`;
+      const spanDays = daysBetween(sD, eD);
+      const spanText =
+        spanDays < 60
+          ? `${Math.round(spanDays)} 天`
+          : spanDays < 365
+          ? `${(spanDays / 30.4375).toFixed(1)} 个月`
+          : `${(spanDays / 365.25).toFixed(1)} 年`;
+      dom.navigatorSpanInfo.textContent = `${sD} — ${eD} (${spanText}) · 拖动边缘选时段 / 按住选区左右滑动`;
     }
 
     const padL = 6;
@@ -1413,7 +1437,7 @@
       ctx.moveTo(curvePts[0].x, yOfLv(curvePts[0].lv));
       for (let i = 1; i < curvePts.length; i++) ctx.lineTo(curvePts[i].x, yOfLv(curvePts[i].lv));
       ctx.strokeStyle = "rgba(110, 110, 115, 0.38)";
-      ctx.lineWidth = 1.2;
+      ctx.lineWidth = 1.0;
       ctx.lineJoin = "round";
       ctx.stroke();
       ctx.restore();
@@ -1457,7 +1481,7 @@
       ctx.moveTo(curvePts[0].x, yOfLv(curvePts[0].lv));
       for (let i = 1; i < curvePts.length; i++) ctx.lineTo(curvePts[i].x, yOfLv(curvePts[i].lv));
       ctx.strokeStyle = "#0071E3";
-      ctx.lineWidth = 1.55;
+      ctx.lineWidth = 1.25;
       ctx.lineJoin = "round";
       ctx.stroke();
       ctx.restore();
@@ -1666,7 +1690,9 @@
     const isLog = state.scaleMode === "log";
     const refIdx = state.hoverIdx !== null ? state.hoverIdx : null;
     dom.curveLegendBar.innerHTML = "";
-    for (const c of model.curves) {
+    for (let i = 0; i < model.curves.length; i++) {
+      const c = model.curves[i];
+      const summary = model.summaryRows[i];
       const idx = refIdx !== null ? refIdx : c.lastValidIdx;
       const nav = idx >= 0 ? c.navArr[idx] : NaN;
       const valTxt = Number.isNaN(nav)
@@ -1675,6 +1701,17 @@
         ? formatMult(nav, 2)
         : formatPct(nav - 1.0, 2);
 
+      const ddVal =
+        refIdx !== null
+          ? c.ddArr[refIdx]
+          : summary
+          ? summary.maxDd
+          : idx >= 0
+          ? c.ddArr[idx]
+          : NaN;
+      const ddLabel = refIdx !== null ? "回撤" : "最大回撤";
+      const ddValTxt = Number.isNaN(ddVal) ? "—" : formatPct(ddVal, 2, false);
+
       const isSingleFocus = state.focusCurve === c.name;
       const isDimmed = state.focusCurve !== "__ALL__" && !isSingleFocus;
       const pill = document.createElement("div");
@@ -1682,11 +1719,17 @@
       pill.title = "点击聚焦或恢复均衡显示";
       const isDashed = c.dash && c.dash.length > 0;
       pill.innerHTML = `
-        <span class="legend-swatch${isDashed ? " dashed" : ""}" style="${
-          isDashed ? `--swatch-color:${c.color}` : `background:${c.color}`
-        }"></span>
-        <span class="legend-name">${c.name}</span>
+        <span class="legend-head">
+          <span class="legend-swatch-wrap">
+            <span class="legend-swatch${isDashed ? " dashed" : ""}" style="${
+              isDashed ? `--swatch-color:${c.color}` : `background:${c.color}`
+            }"></span>
+          </span>
+          <span class="legend-name">${c.name}</span>
+        </span>
         <span class="legend-val">${valTxt}</span>
+        <span class="legend-sub-label">${ddLabel}</span>
+        <span class="legend-dd">${ddValTxt}</span>
       `;
       pill.addEventListener("click", () => {
         state.focusCurve = state.focusCurve === c.name ? "__ALL__" : c.name;
