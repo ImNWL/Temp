@@ -1,193 +1,45 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
-import math
+import os
 import re
 import sys
+import threading
+import webbrowser
 from dataclasses import dataclass
-from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import streamlit as st
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
 STOCK_DATA_DIR = APP_DIR.parent / "stockData"
 FETCH_SCRIPT_PATH = STOCK_DATA_DIR / "fetch_data.py"
-TRADING_DAYS_PER_YEAR = 252
-
-# Curated editorial financial palette anchored on Sapphire Blue
-FIXED_COLORS: dict[str, str] = {
-    "QQQ": "#1D4ED8",   # Sapphire Blue
-    "QLD": "#0891B2",   # Cerulean Cyan
-    "TQQQ": "#E11D48",  # Rose Crimson
-}
-FALLBACK_PALETTE = [
-    "#7C3AED",  # Violet
-    "#D97706",  # Amber Gold
-    "#0284C7",  # Sky Blue
-    "#DB2777",  # Berry Pink
-    "#4F46E5",  # Indigo
-    "#0D9488",  # Teal
-    "#EA580C",  # Burnt Orange
-    "#65A30D",  # Olive Green
-]
-SYNTH_CUSTOM_COLOR = "#059669"  # Emerald
-
-MARKET_REGIMES = [
-    ("2008 次贷危机", date(2007, 10, 31), date(2009, 3, 9), "rgba(225, 29, 72, 0.05)"),
-    ("2020 疫情熔断", date(2020, 2, 19), date(2020, 3, 23), "rgba(217, 119, 6, 0.06)"),
-    ("2022 加息熊市", date(2022, 1, 3), date(2022, 12, 28), "rgba(37, 99, 235, 0.05)"),
-]
 
 
 @dataclass
 class DatasetEntry:
     key: str
-    kind: str  # "market" or "strategy"
+    kind: str  # "market" | "strategy"
     path: Path
-    series: pd.Series
+    dates: list[str]
+    values: list[float]
 
 
-@dataclass
-class CurveMeta:
-    name: str
-    kind_label: str  # "真实行情" | "策略" | "合成杠杆" | "合成参考"
-    color: str
-    dash: str
-    width: float
-    is_partial: bool = False
-    actual_start: date | None = None
-    wiped_out: bool = False
-    wipeout_date: date | None = None
+class AddTickerRequest(BaseModel):
+    raw: str
 
 
-st.set_page_config(
-    page_title="策略对比",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    """
-    <style>
-    /* Typography & Layout */
-    html, body, [class*="css"] {
-        font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
-        font-variant-numeric: tabular-nums;
-    }
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2.25rem;
-        max-width: 1480px;
-    }
-
-    /* Sidebar subtle separation & polish */
-    section[data-testid="stSidebar"] {
-        background-color: #FFFFFF;
-        border-right: 1px solid #E2E8F0;
-    }
-    section[data-testid="stSidebar"] .block-container {
-        padding-top: 1.25rem;
-    }
-
-    /* Title Banner */
-    .hero-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        flex-wrap: wrap;
-        gap: 0.75rem;
-        margin-bottom: 0.75rem;
-    }
-    .hero-title {
-        font-size: 1.65rem;
-        font-weight: 700;
-        color: #0F172A;
-        letter-spacing: -0.02em;
-        margin: 0;
-        line-height: 1.25;
-    }
-    .hero-title span.accent {
-        color: #2563EB;
-    }
-    .hero-subtitle {
-        font-size: 0.875rem;
-        color: #64748B;
-        margin: 0.25rem 0 0 0;
-    }
-    .hero-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        background: #EFF6FF;
-        color: #1D4ED8;
-        border: 1px solid #BFDBFE;
-        border-radius: 999px;
-        padding: 4px 12px;
-        font-size: 0.78rem;
-        font-weight: 600;
-    }
-
-    /* Soft elevated cards for bordered containers */
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        background-color: #FFFFFF;
-        border: 1px solid #E2E8F0 !important;
-        border-radius: 14px !important;
-        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03), 0 6px 20px rgba(37, 99, 235, 0.04);
-        padding: 0.9rem 1.1rem !important;
-    }
-
-    /* Blue-themed multiselect tags */
-    span[data-baseweb="tag"] {
-        background-color: #EFF6FF !important;
-        color: #1E40AF !important;
-        border: 1px solid #BFDBFE !important;
-        border-radius: 6px !important;
-    }
-    span[data-baseweb="tag"] svg {
-        fill: #3B82F6 !important;
-    }
-
-    /* Compact rounded buttons */
-    .stButton > button {
-        border-radius: 8px;
-        font-weight: 500;
-        white-space: nowrap;
-        padding-left: 0.45rem;
-        padding-right: 0.45rem;
-        transition: all 0.15s ease;
-    }
-    .stButton > button[kind="secondary"] {
-        border-color: #CBD5E1;
-        color: #334155;
-        background-color: #F8FAFC;
-    }
-    .stButton > button[kind="secondary"]:hover {
-        border-color: #3B82F6;
-        color: #1D4ED8;
-        background-color: #EFF6FF;
-    }
-
-    /* Divider softness */
-    hr {
-        border-color: #E2E8F0 !important;
-        margin: 0.85rem 0 !important;
-    }
-
-    /* Dataframe crisp header */
-    div[data-testid="stDataFrame"] {
-        border-radius: 10px;
-        overflow: hidden;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+class RefreshTickerRequest(BaseModel):
+    symbols: list[str]
+    full: bool = False
 
 
 def _load_fetcher_module():
@@ -198,6 +50,15 @@ def _load_fetcher_module():
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _parse_symbol_tokens(raw_text: str) -> list[str]:
+    tokens = [t.strip().upper() for t in re.split(r"[,，\s]+", raw_text.strip()) if t.strip()]
+    seen: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.append(token)
+    return seen
 
 
 def _parse_csv_series(csv_path: Path, name: str, force_strategy: bool = False) -> DatasetEntry:
@@ -258,776 +119,168 @@ def _parse_csv_series(csv_path: Path, name: str, force_strategy: bool = False) -
 
     series.index = series.index.tz_localize(None)
     series = series[~series.index.duplicated(keep="last")]
+    if series.empty:
+        raise ValueError(f"{csv_path.name} 无有效正数价格/净值记录")
 
     is_ohlcv = {"open", "high", "low", "close"}.issubset(set(lower_map.keys()))
     kind = "strategy" if (force_strategy or not is_ohlcv) else "market"
-    return DatasetEntry(key=name, kind=kind, path=csv_path, series=series)
+
+    date_strs = series.index.strftime("%Y-%m-%d").tolist()
+    float_vals = [round(float(v), 6) for v in series.values]
+    return DatasetEntry(
+        key=name,
+        kind=kind,
+        path=csv_path,
+        dates=date_strs,
+        values=float_vals,
+    )
 
 
-@st.cache_data(ttl=60 * 60)
-def load_catalog() -> tuple[dict[str, DatasetEntry], list[str]]:
+def scan_catalog(auto_bootstrap: bool = True) -> dict[str, Any]:
     catalog: dict[str, DatasetEntry] = {}
     parse_errors: list[str] = []
 
-    candidates: list[tuple[Path, bool]] = []
-    if STOCK_DATA_DIR.exists():
-        for p in sorted(STOCK_DATA_DIR.glob("*.csv")):
-            candidates.append((p, False))
-        strat_dir = STOCK_DATA_DIR / "strategies"
-        if strat_dir.exists():
-            for p in sorted(strat_dir.glob("*.csv")):
-                candidates.append((p, True))
+    def _scan_once() -> None:
+        catalog.clear()
+        parse_errors.clear()
+        candidates: list[tuple[Path, bool]] = []
+        if STOCK_DATA_DIR.exists():
+            for p in sorted(STOCK_DATA_DIR.glob("*.csv")):
+                candidates.append((p, False))
+            strat_dir = STOCK_DATA_DIR / "strategies"
+            if strat_dir.exists():
+                for p in sorted(strat_dir.glob("*.csv")):
+                    candidates.append((p, True))
 
-    for csv_path, force_strat in candidates:
-        key = f"strategies/{csv_path.stem}" if force_strat else csv_path.stem
-        try:
-            entry = _parse_csv_series(csv_path, key, force_strategy=force_strat)
-            if not entry.series.empty:
+        for csv_path, force_strat in candidates:
+            key = f"strategies/{csv_path.stem}" if force_strat else csv_path.stem
+            try:
+                entry = _parse_csv_series(csv_path, key, force_strategy=force_strat)
                 catalog[key] = entry
+            except Exception as exc:
+                parse_errors.append(f"{csv_path.name}: {exc}")
+
+    _scan_once()
+    if not catalog and auto_bootstrap:
+        try:
+            fetcher = _load_fetcher_module()
+            fetcher.fetch_symbols(("QQQ", "QLD", "TQQQ"), data_dir=STOCK_DATA_DIR)
+            _scan_once()
         except Exception as exc:
-            parse_errors.append(f"{csv_path.name}: {exc}")
+            parse_errors.append(f"自动拉取默认数据失败: {exc}")
 
     priority = ["QQQ", "QLD", "TQQQ"]
-    ordered: dict[str, DatasetEntry] = {}
-    for k in priority:
-        if k in catalog:
-            ordered[k] = catalog[k]
-    for k, v in catalog.items():
-        if k not in ordered:
-            ordered[k] = v
-    return ordered, parse_errors
+    ordered_keys: list[str] = [k for k in priority if k in catalog]
+    ordered_keys.extend(k for k in catalog.keys() if k not in ordered_keys)
 
-
-def _assign_color(name: str, kind: str, color_idx: int) -> str:
-    if name in FIXED_COLORS:
-        return FIXED_COLORS[name]
-    if kind == "合成":
-        return SYNTH_CUSTOM_COLOR
-    return FALLBACK_PALETTE[color_idx % len(FALLBACK_PALETTE)]
-
-
-def _build_synthetic_leverage(
-    base_prices: pd.Series,
-    leverage: float,
-    name: str = "",
-) -> tuple[pd.Series, date | None]:
-    daily_returns = base_prices.pct_change(fill_method=None).fillna(0.0)
-    daily_factors = 1.0 + leverage * daily_returns
-    daily_factors.iloc[0] = 1.0
-
-    wipeout_mask = daily_factors <= 0
-    wipeout_date: date | None = None
-    if wipeout_mask.any():
-        first_idx = daily_factors.index[wipeout_mask][0]
-        wipeout_date = first_idx.date()
-        clamped = daily_factors.copy()
-        clamped.loc[first_idx:] = 0.0
-        nav = clamped.cumprod()
-    else:
-        nav = daily_factors.cumprod()
-
-    nav.name = name
-    return nav, wipeout_date
-
-
-def _parse_symbol_tokens(raw_text: str) -> list[str]:
-    tokens = [t.strip().upper() for t in re.split(r"[,，\s]+", raw_text.strip()) if t.strip()]
-    seen: list[str] = []
-    for t in tokens:
-        if t not in seen:
-            seen.append(t)
-    return seen
-
-
-def _compute_preset_dates(
-    preset: str,
-    min_date: date,
-    max_date: date,
-) -> tuple[date, date]:
-    if preset == "YTD":
-        s = max(min_date, date(max_date.year, 1, 1))
-        e = max_date
-    elif preset == "近1年":
-        s = max(min_date, max_date - timedelta(days=365))
-        e = max_date
-    elif preset == "近3年":
-        s = max(min_date, max_date - timedelta(days=365 * 3 + 1))
-        e = max_date
-    elif preset == "近5年":
-        s = max(min_date, max_date - timedelta(days=365 * 5 + 2))
-        e = max_date
-    elif preset == "近10年":
-        s = max(min_date, max_date - timedelta(days=365 * 10 + 3))
-        e = max_date
-    elif preset == "全部":
-        s = min_date
-        e = max_date
-    else:
-        s = max(min_date, max_date - timedelta(days=365 * 10 + 3))
-        e = max_date
-
-    if s >= e:
-        s = max(min_date, e - timedelta(days=1))
-    return s, e
-
-
-def _place_end_labels(
-    items: list[tuple[str, pd.Timestamp, float, str, bool]],
-    use_log: bool,
-    y_min_val: float,
-    y_max_val: float,
-) -> list[dict]:
-    if not items:
-        return []
-
-    def to_vis(v: float) -> float:
-        return math.log10(v) if use_log and v > 0 else v
-
-    def from_vis(vv: float) -> float:
-        return 10 ** vv if use_log else vv
-
-    vis_low = to_vis(y_min_val)
-    vis_high = to_vis(y_max_val)
-    span = max(vis_high - vis_low, 1e-6)
-    min_gap = span * 0.058
-
-    prepared = []
-    for text, dt, raw_y, color, is_dimmed in items:
-        if pd.isna(raw_y) or (use_log and raw_y <= 0):
-            continue
-        prepared.append(
+    items = []
+    for k in ordered_keys:
+        entry = catalog[k]
+        items.append(
             {
-                "text": text,
-                "dt": dt,
-                "vis_y": to_vis(float(raw_y)),
-                "color": color,
-                "dimmed": is_dimmed,
+                "key": entry.key,
+                "kind": entry.kind,
+                "startDate": entry.dates[0],
+                "endDate": entry.dates[-1],
+                "count": len(entry.dates),
+                "dates": entry.dates,
+                "values": entry.values,
             }
         )
 
-    prepared.sort(key=lambda item: item["vis_y"])
-    for i in range(1, len(prepared)):
-        prev_y = prepared[i - 1]["vis_y"]
-        if prepared[i]["vis_y"] - prev_y < min_gap:
-            prepared[i]["vis_y"] = prev_y + min_gap
-
-    if len(prepared) >= 2 and prepared[-1]["vis_y"] > vis_high + min_gap:
-        shift = prepared[-1]["vis_y"] - (vis_high + min_gap * 0.5)
-        for item in prepared:
-            item["vis_y"] -= shift
-        for i in range(1, len(prepared)):
-            if prepared[i]["vis_y"] - prepared[i - 1]["vis_y"] < min_gap:
-                prepared[i]["vis_y"] = prepared[i - 1]["vis_y"] + min_gap
-
-    for item in prepared:
-        # Plotly annotations on a log y-axis expect log10 coordinates
-        item["y"] = item["vis_y"]
-    return prepared
+    return {
+        "items": items,
+        "parseErrors": parse_errors,
+    }
 
 
-def build_main_chart(
-    nav_df: pd.DataFrame,
-    meta_map: dict[str, CurveMeta],
-    use_log_scale: bool,
-    show_drawdown: bool,
-    show_end_labels: bool,
-    show_regimes: bool,
-    focus_curve: str,
-) -> go.Figure:
-    is_return_mode = not use_log_scale
-    plot_df = (nav_df - 1.0) if is_return_mode else nav_df.copy()
-
-    if use_log_scale:
-        plot_df = plot_df.where(plot_df > 0)
-
-    if show_drawdown:
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.06,
-            row_heights=[0.74, 0.26],
-        )
-        chart_height = 670
-    else:
-        fig = make_subplots(rows=1, cols=1)
-        chart_height = 550
-
-    hover_fmt = "%{y:+.2%}" if is_return_mode else "%{y:.2f}x"
-    end_label_candidates: list[tuple[str, pd.Timestamp, float, str, bool]] = []
-
-    for col in plot_df.columns:
-        meta = meta_map[col]
-        series = plot_df[col]
-        valid = series.dropna()
-        if valid.empty:
-            continue
-
-        is_focused = focus_curve == "全部均衡显示" or focus_curve == col
-        opacity = 1.0 if is_focused else 0.18
-        line_width = (meta.width + 0.9) if (focus_curve == col) else (meta.width if is_focused else 1.2)
-
-        # Subtle area breath under QQQ (or single focused curve) in linear mode
-        use_subtle_fill = (
-            not use_log_scale
-            and (
-                (focus_curve == col)
-                or (focus_curve == "全部均衡显示" and col == "QQQ")
-            )
-        )
-        fill_color = "rgba(37, 99, 235, 0.05)" if use_subtle_fill else None
-
-        fig.add_trace(
-            go.Scatter(
-                x=series.index,
-                y=series,
-                mode="lines",
-                name=col,
-                line=dict(color=meta.color, width=line_width, dash=meta.dash),
-                fill="tozeroy" if (use_subtle_fill and is_return_mode) else None,
-                fillcolor=fill_color if is_return_mode else None,
-                opacity=opacity,
-                connectgaps=False,
-                hovertemplate=f"<b>{col}</b>: {hover_fmt}<extra></extra>",
-            ),
-            row=1,
-            col=1,
-        )
-
-        if show_end_labels:
-            last_dt = valid.index[-1]
-            last_val = float(valid.iloc[-1])
-            val_txt = f"{last_val:+.1%}" if is_return_mode else f"{last_val:.2f}x"
-            end_label_candidates.append(
-                (f" {col}  {val_txt} ", last_dt, last_val, meta.color, not is_focused)
-            )
-
-        if show_drawdown:
-            nav_valid = nav_df[col].dropna()
-            if not nav_valid.empty:
-                dd = (nav_valid / nav_valid.cummax() - 1.0).reindex(nav_df.index)
-                fig.add_trace(
-                    go.Scatter(
-                        x=dd.index,
-                        y=dd,
-                        mode="lines",
-                        name=f"{col} 回撤",
-                        legendgroup=col,
-                        showlegend=False,
-                        line=dict(color=meta.color, width=max(1.2, line_width - 0.5), dash=meta.dash),
-                        fill="tozeroy" if (col == "QQQ" or focus_curve == col) else None,
-                        fillcolor="rgba(37, 99, 235, 0.07)" if (col == "QQQ" or focus_curve == col) else None,
-                        opacity=opacity,
-                        connectgaps=False,
-                        hovertemplate=f"{col} 回撤: %{{y:.1%}}<extra></extra>",
-                    ),
-                    row=2,
-                    col=1,
-                )
-
-    baseline_y = 0.0 if is_return_mode else 1.0
-    if not (use_log_scale and not is_return_mode):
-        fig.add_hline(
-            y=baseline_y,
-            line_width=1.2,
-            line_dash="dot",
-            line_color="rgba(100, 116, 139, 0.45)",
-            row=1,
-            col=1,
-        )
-
-    if show_regimes and not plot_df.empty:
-        win_start = plot_df.index.min().date()
-        win_end = plot_df.index.max().date()
-        for label, r_start, r_end, fill_rgba in MARKET_REGIMES:
-            ov_start = max(win_start, r_start)
-            ov_end = min(win_end, r_end)
-            if ov_start < ov_end:
-                fig.add_vrect(
-                    x0=ov_start.isoformat(),
-                    x1=ov_end.isoformat(),
-                    fillcolor=fill_rgba,
-                    line_width=0,
-                    layer="below",
-                    annotation_text=label,
-                    annotation_position="top left",
-                    annotation_font=dict(size=10, color="#64748B"),
-                    row=1,
-                    col=1,
-                )
-
-    if show_end_labels and end_label_candidates:
-        all_valid_vals = plot_df.stack().dropna()
-        if not all_valid_vals.empty:
-            y_min_v = float(all_valid_vals.min())
-            y_max_v = float(all_valid_vals.max())
-            placed = _place_end_labels(
-                end_label_candidates,
-                use_log=(use_log_scale and not is_return_mode),
-                y_min_val=y_min_v,
-                y_max_val=y_max_v,
-            )
-            for item in placed:
-                fig.add_annotation(
-                    x=item["dt"],
-                    y=item["y"],
-                    text=item["text"],
-                    showarrow=False,
-                    xanchor="left",
-                    xshift=10,
-                    xref="x",
-                    yref="y",
-                    opacity=0.25 if item["dimmed"] else 0.96,
-                    font=dict(size=11, color=item["color"], family="Inter, -apple-system, sans-serif"),
-                    bgcolor="rgba(255, 255, 255, 0.90)",
-                    bordercolor="rgba(226, 232, 240, 0.95)",
-                    borderwidth=1,
-                    borderpad=3,
-                )
-
-    x_min = plot_df.index.min()
-    x_max = plot_df.index.max()
-    if show_end_labels and x_max > x_min:
-        pad_days = max(int((x_max - x_min).days * 0.22), 14)
-        x_range = [x_min, x_max + pd.Timedelta(days=pad_days)]
-    else:
-        x_range = [x_min, x_max]
-
-    fig.update_layout(
-        height=chart_height,
-        margin=dict(l=8, r=18, t=42, b=8),
-        hovermode="x unified",
-        hoverlabel=dict(
-            align="left",
-            bgcolor="rgba(255, 255, 255, 0.97)",
-            bordercolor="rgba(37, 99, 235, 0.25)",
-            font=dict(size=12, color="#0F172A"),
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(0,0,0,0)",
-            font=dict(size=12, color="#334155"),
-            itemclick="toggle",
-            itemdoubleclick="toggleothers",
-        ),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#334155"),
-    )
-
-    fig.update_xaxes(
-        showgrid=False,
-        zeroline=False,
-        hoverformat="%Y-%m-%d",
-        showspikes=True,
-        spikemode="across",
-        spikesnap="cursor",
-        spikedash="dot",
-        spikethickness=1,
-        spikecolor="rgba(37, 99, 235, 0.40)",
-        tickfont=dict(color="#64748B", size=11),
-        range=x_range,
-    )
-
-    fig.update_yaxes(
-        title_text="累计收益率" if is_return_mode else "净值倍数",
-        title_font=dict(color="#475569", size=12),
-        tickfont=dict(color="#64748B", size=11),
-        tickformat=".0%" if is_return_mode else ".2f",
-        type="log" if (use_log_scale and not is_return_mode) else "linear",
-        showgrid=True,
-        gridcolor="rgba(203, 213, 225, 0.35)",
-        zeroline=False,
-        row=1,
-        col=1,
-    )
-
-    if show_drawdown:
-        fig.update_yaxes(
-            title_text="回撤",
-            title_font=dict(color="#475569", size=12),
-            tickfont=dict(color="#64748B", size=11),
-            tickformat=".0%",
-            showgrid=True,
-            gridcolor="rgba(203, 213, 225, 0.35)",
-            zeroline=True,
-            zerolinecolor="rgba(148, 163, 184, 0.45)",
-            row=2,
-            col=1,
-        )
-        fig.update_xaxes(title_text="", row=2, col=1)
-    else:
-        fig.update_xaxes(title_text="", row=1, col=1)
-
-    return fig
+app = FastAPI(title="策略对比", docs_url=None, redoc_url=None)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-def calculate_summary(nav_df: pd.DataFrame, meta_map: dict[str, CurveMeta]) -> pd.DataFrame:
-    rows = []
-    for name in nav_df.columns:
-        nav = nav_df[name].dropna()
-        if nav.empty:
-            continue
-        years = max((nav.index[-1] - nav.index[0]).days / 365.25, 1.0 / 365.25)
-        final_mult = float(nav.iloc[-1] / nav.iloc[0])
-        total_ret = final_mult - 1.0
-        cagr = -1.0 if final_mult <= 0 else final_mult ** (1.0 / years) - 1.0
-
-        daily_ret = nav.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
-        ann_vol = float(daily_ret.std() * np.sqrt(TRADING_DAYS_PER_YEAR)) if len(daily_ret) > 1 else np.nan
-        max_dd = float((nav / nav.cummax() - 1.0).min())
-
-        rows.append(
-            {
-                "标的": name,
-                "类型": meta_map[name].kind_label,
-                "有效区间": f"{nav.index[0]:%Y-%m-%d} ~ {nav.index[-1]:%Y-%m-%d}",
-                "最终倍数": final_mult,
-                "累计收益": total_ret,
-                "年化收益": cagr,
-                "年化波动率": ann_vol,
-                "最大回撤": max_dd,
-            }
-        )
-    return pd.DataFrame(rows)
+@app.get("/api/catalog")
+def api_get_catalog() -> dict[str, Any]:
+    return scan_catalog(auto_bootstrap=True)
 
 
-# --- Load Catalog ---
-catalog, parse_errors = load_catalog()
-if not catalog:
-    st.warning("`stockData/` 中暂无可用数据，正在自动拉取 QQQ / QLD / TQQQ ...")
+@app.post("/api/tickers/add")
+def api_add_tickers(req: AddTickerRequest) -> dict[str, Any]:
+    tokens = _parse_symbol_tokens(req.raw)
+    if not tokens:
+        raise HTTPException(status_code=400, detail="请输入有效的股票或 ETF 代码")
+
     try:
         fetcher = _load_fetcher_module()
-        fetcher.fetch_symbols(("QQQ", "QLD", "TQQQ"), data_dir=STOCK_DATA_DIR)
-        load_catalog.clear()
-        catalog, parse_errors = load_catalog()
+        results = fetcher.fetch_symbols(tokens, data_dir=STOCK_DATA_DIR, full=False)
     except Exception as exc:
-        st.error(f"拉取失败：{exc}")
+        raise HTTPException(status_code=500, detail=f"拉取异常：{exc}") from exc
 
-if not catalog:
-    st.error(f"`{STOCK_DATA_DIR}` 中未找到有效 CSV 数据。")
-    st.stop()
-
-all_keys = list(catalog.keys())
-default_selected = [k for k in ("QQQ", "QLD", "TQQQ") if k in catalog] or [all_keys[0]]
-
-# --- Session State Init ---
-if "selected_items" not in st.session_state:
-    st.session_state["selected_items"] = default_selected
-else:
-    st.session_state["selected_items"] = [k for k in st.session_state["selected_items"] if k in catalog]
-
-if "leverage_val" not in st.session_state:
-    st.session_state["leverage_val"] = 1.5
-if "date_preset" not in st.session_state:
-    st.session_state["date_preset"] = "近10年"
+    ok = [r.symbol for r in results if r.success]
+    failed = [{"symbol": r.symbol, "error": r.error} for r in results if not r.success]
+    return {
+        "ok": ok,
+        "failed": failed,
+        "catalog": scan_catalog(auto_bootstrap=False),
+    }
 
 
-# --- Sidebar ---
-with st.sidebar:
-    st.markdown("### 对比篮子")
+@app.post("/api/tickers/refresh")
+def api_refresh_tickers(req: RefreshTickerRequest) -> dict[str, Any]:
+    current = scan_catalog(auto_bootstrap=False)
+    market_keys = {item["key"] for item in current["items"] if item["kind"] == "market"}
+    targets = [s for s in req.symbols if s in market_keys]
+    if not targets:
+        raise HTTPException(status_code=400, detail="当前未选中可更新的正式行情标的")
 
-    with st.form("add_ticker_form", clear_on_submit=True):
-        new_ticker_raw = st.text_input("添加新标的")
-        submitted = st.form_submit_button("加入", type="primary", use_container_width=True)
+    try:
+        fetcher = _load_fetcher_module()
+        results = fetcher.fetch_symbols(targets, data_dir=STOCK_DATA_DIR, full=req.full)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"更新异常：{exc}") from exc
 
-    if submitted and new_ticker_raw.strip():
-        tokens = _parse_symbol_tokens(new_ticker_raw)
-        with st.spinner(f"正在拉取 {', '.join(tokens)} ..."):
-            try:
-                fetcher = _load_fetcher_module()
-                results = fetcher.fetch_symbols(tokens, data_dir=STOCK_DATA_DIR)
-                ok = [r.symbol for r in results if r.success]
-                fail = [f"{r.symbol}({r.error})" for r in results if not r.success]
-                if ok:
-                    load_catalog.clear()
-                    catalog, parse_errors = load_catalog()
-                    all_keys = list(catalog.keys())
-                    curr = list(st.session_state.get("selected_items", []))
-                    for sym in ok:
-                        if sym in catalog and sym not in curr:
-                            curr.append(sym)
-                    st.session_state["selected_items"] = curr
-                    st.success(f"已拉取并加入：{', '.join(ok)}")
-                if fail:
-                    st.error("拉取失败：" + "；".join(fail))
-                if ok:
-                    st.rerun()
-            except Exception as exc:
-                st.error(f"拉取异常：{exc}")
+    updated = [
+        {"symbol": r.symbol, "addedRows": r.added_rows, "rows": r.rows}
+        for r in results
+        if r.success
+    ]
+    failed = [{"symbol": r.symbol, "error": r.error} for r in results if not r.success]
+    return {
+        "mode": "full" if req.full else "incremental",
+        "updated": updated,
+        "failed": failed,
+        "catalog": scan_catalog(auto_bootstrap=False),
+    }
 
-    selected_items = st.multiselect(
-        "已选股票 / 策略",
-        options=all_keys,
-        key="selected_items",
-        format_func=lambda k: f"{k} [策略]" if catalog[k].kind == "strategy" else k,
-        help="自动扫描 stockData/*.csv 与 stockData/strategies/*.csv；将策略净值 CSV 放入 stockData 即可勾选。",
-    )
 
-    st.divider()
-    st.markdown("### 合成杠杆（如 xQQQ）")
-    enable_synth = st.checkbox("叠加合成杠杆曲线", value=True)
-    if enable_synth:
-        synth_base_options = all_keys
-        default_base_idx = synth_base_options.index("QQQ") if "QQQ" in synth_base_options else 0
-        synth_base = st.selectbox(
-            "合成基准标的",
-            options=synth_base_options,
-            index=default_base_idx,
-            format_func=lambda k: f"{k} [策略]" if catalog[k].kind == "strategy" else k,
-        )
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-        leverage = st.number_input(
-            "杠杆倍数 x",
-            min_value=-5.0,
-            max_value=10.0,
-            step=0.1,
-            key="leverage_val",
-        )
+
+@app.get("/")
+def serve_index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+def _run_server() -> None:
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="启动策略对比 Web 服务")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8501")), help="端口，默认 8501")
+    parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
+    args = parser.parse_args()
+
+    url = f"http://{args.host}:{args.port}"
+    print(f"\n  策略对比已启动: {url}\n")
+    if args.open:
+        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    if "streamlit" in sys.modules:
+        import streamlit as st
+
+        st.warning("本项目已升级为独立高性能 Web 应用，请在终端运行：`python3 app.py`")
     else:
-        synth_base = "QQQ" if "QQQ" in catalog else all_keys[0]
-        leverage = float(st.session_state["leverage_val"])
-
-    market_selected = [k for k in selected_items if catalog[k].kind == "market"]
-    if market_selected:
-        st.divider()
-        full_update = st.checkbox("全量拉取（2015年起）", value=False)
-        if st.button("更新已选行情", use_container_width=True):
-            with st.spinner("正在更新正式行情数据..."):
-                fetcher = _load_fetcher_module()
-                res = fetcher.fetch_symbols(market_selected, data_dir=STOCK_DATA_DIR, full=full_update)
-                fail = [f"{r.symbol}: {r.error}" for r in res if not r.success]
-                load_catalog.clear()
-                if fail:
-                    st.session_state["update_notice"] = ("error", "部分更新失败：" + "；".join(fail))
-                else:
-                    mode_txt = "全量更新" if full_update else "增量更新"
-                    detail = "、".join(f"{r.symbol}(+{r.added_rows})" for r in res if r.success)
-                    st.session_state["update_notice"] = ("success", f"{mode_txt}完成：{detail}")
-                    st.rerun()
-
-        if "update_notice" in st.session_state:
-            lvl, msg = st.session_state.pop("update_notice")
-            if lvl == "error":
-                st.error(msg)
-            else:
-                st.success(msg)
-
-    if parse_errors:
-        st.warning("部分 CSV 未加载：" + " | ".join(parse_errors))
-
-
-# --- Validate at least 1 active series ---
-active_keys = list(selected_items)
-active_base_series = [catalog[k].series for k in active_keys]
-if enable_synth:
-    active_base_series.append(catalog[synth_base].series)
-
-if not active_base_series:
-    st.info("请在左侧栏至少选择一个股票/策略，或开启合成杠杆曲线。")
-    st.stop()
-
-global_min_date = min(s.index.min().date() for s in active_base_series)
-global_max_date = max(s.index.max().date() for s in active_base_series)
-
-if "start_date_input" not in st.session_state or "end_date_input" not in st.session_state:
-    s0, e0 = _compute_preset_dates("近10年", global_min_date, global_max_date)
-    st.session_state["start_date_input"] = s0
-    st.session_state["end_date_input"] = e0
-else:
-    st.session_state["start_date_input"] = max(global_min_date, min(st.session_state["start_date_input"], global_max_date))
-    st.session_state["end_date_input"] = max(global_min_date, min(st.session_state["end_date_input"], global_max_date))
-
-
-def _on_preset_change() -> None:
-    preset = st.session_state.get("date_preset")
-    if preset:
-        s, e = _compute_preset_dates(preset, global_min_date, global_max_date)
-        st.session_state["start_date_input"] = s
-        st.session_state["end_date_input"] = e
-
-
-def _on_manual_date_change() -> None:
-    st.session_state["date_preset"] = None
-
-
-# --- Header Banner ---
-active_count = len(active_keys) + (1 if enable_synth else 0)
-st.markdown(
-    f"""
-    <div class="hero-header">
-        <div>
-            <h1 class="hero-title">策略对比</h1>
-        </div>
-        <div class="hero-pill">● 当前对比 {active_count} 条曲线 · 最新数据至 {global_max_date:%Y-%m-%d}</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# --- Time Range Bar ---
-preset_opts = ["YTD", "近1年", "近3年", "近5年", "近10年", "全部"]
-t_col1, t_col2, t_col3 = st.columns([3.4, 1.0, 1.0])
-with t_col1:
-    st.segmented_control(
-        "快捷周期",
-        options=preset_opts,
-        key="date_preset",
-        on_change=_on_preset_change,
-        label_visibility="collapsed",
-    )
-with t_col2:
-    start_date = st.date_input(
-        "开始日期",
-        min_value=global_min_date,
-        max_value=global_max_date,
-        key="start_date_input",
-        on_change=_on_manual_date_change,
-        label_visibility="collapsed",
-    )
-with t_col3:
-    end_date = st.date_input(
-        "结束日期",
-        min_value=global_min_date,
-        max_value=global_max_date,
-        key="end_date_input",
-        on_change=_on_manual_date_change,
-        label_visibility="collapsed",
-    )
-
-if start_date >= end_date:
-    st.error("开始日期必须早于结束日期。")
-    st.stop()
-
-
-# --- Assemble Normalized Curves ---
-series_list: list[pd.Series] = []
-meta_map: dict[str, CurveMeta] = {}
-color_counter = 0
-
-for k in active_keys:
-    entry = catalog[k]
-    s_win = entry.series.loc[
-        (entry.series.index.date >= start_date) & (entry.series.index.date <= end_date)
-    ]
-    if s_win.empty:
-        continue
-
-    display_name = f"{k} [策略]" if entry.kind == "strategy" else k
-    norm = (s_win / s_win.iloc[0]).rename(display_name)
-    series_list.append(norm)
-
-    color = _assign_color(k, entry.kind, color_counter)
-    if k not in FIXED_COLORS:
-        color_counter += 1
-
-    meta_map[display_name] = CurveMeta(
-        name=display_name,
-        kind_label="策略" if entry.kind == "strategy" else "真实行情",
-        color=color,
-        dash="solid",
-        width=2.6 if entry.kind == "strategy" else 2.2,
-        is_partial=s_win.index[0].date() > start_date + timedelta(days=5),
-        actual_start=s_win.index[0].date(),
-    )
-
-if enable_synth:
-    base_entry = catalog[synth_base]
-    base_win = base_entry.series.loc[
-        (base_entry.series.index.date >= start_date) & (base_entry.series.index.date <= end_date)
-    ]
-    if not base_win.empty:
-        synth_name = f"{leverage:g}x {synth_base} (合成)"
-        synth_nav, wipe_dt = _build_synthetic_leverage(base_win, leverage, synth_name)
-        series_list.append(synth_nav)
-        meta_map[synth_name] = CurveMeta(
-            name=synth_name,
-            kind_label="合成杠杆",
-            color=_assign_color(synth_name, "合成", 0),
-            dash="dash",
-            width=2.2,
-            is_partial=base_win.index[0].date() > start_date + timedelta(days=5),
-            actual_start=base_win.index[0].date(),
-            wiped_out=wipe_dt is not None,
-            wipeout_date=wipe_dt,
-        )
-
-if not series_list:
-    st.warning("所选时间范围内没有任何可用数据，请调整日期范围。")
-    st.stop()
-
-nav_df = pd.concat(series_list, axis=1).sort_index().dropna(how="all")
-
-
-# --- Hero Chart Card ---
-with st.container(border=True):
-    c_bar1, c_bar2, c_bar3, c_bar4, c_bar5 = st.columns([1.4, 1.6, 0.9, 0.9, 0.95])
-    with c_bar1:
-        scale_mode = st.radio(
-            "坐标",
-            options=["线性", "对数"],
-            index=0,
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-        use_log_scale = scale_mode == "对数"
-    with c_bar2:
-        focus_curve = st.selectbox(
-            "聚光灯高亮",
-            options=["全部均衡显示"] + list(nav_df.columns),
-            index=0,
-            label_visibility="collapsed",
-            help="选中某条曲线后，其余曲线自动退居半透明背景。",
-        )
-    with c_bar3:
-        show_end_labels = st.checkbox("末端标签", value=True)
-    with c_bar4:
-        show_drawdown = st.checkbox("回撤副图", value=True)
-    with c_bar5:
-        show_regimes = st.checkbox("熊市背景", value=False)
-
-    partial_list = [f"**{m.name}** (`{m.actual_start}` 起)" for m in meta_map.values() if m.is_partial]
-    if partial_list:
-        st.caption(
-            "注：以下曲线晚于所选开始日期，按其区间内首个交易日归零起算："
-            + "、".join(partial_list)
-            + "。"
-        )
-
-    wipe_list = [f"**{m.name}** 在 `{m.wipeout_date}` 触发单日归零" for m in meta_map.values() if m.wiped_out]
-    if wipe_list:
-        st.warning("；".join(wipe_list) + "（已按清零截断）。")
-
-    fig = build_main_chart(
-        nav_df=nav_df,
-        meta_map=meta_map,
-        use_log_scale=use_log_scale,
-        show_drawdown=show_drawdown,
-        show_end_labels=show_end_labels,
-        show_regimes=show_regimes,
-        focus_curve=focus_curve,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# --- Summary Card ---
-with st.container(border=True):
-    st.markdown("#### 区间表现汇总")
-    summary_df = calculate_summary(nav_df, meta_map)
-    st.dataframe(
-        summary_df,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "最终倍数": st.column_config.NumberColumn(format="%.2fx"),
-            "累计收益": st.column_config.NumberColumn(format="percent"),
-            "年化收益": st.column_config.NumberColumn(format="percent"),
-            "年化波动率": st.column_config.NumberColumn(format="percent"),
-            "最大回撤": st.column_config.NumberColumn(format="percent"),
-        },
-    )
+        _run_server()

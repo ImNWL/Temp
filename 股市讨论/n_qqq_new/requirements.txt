@@ -1,6 +1,6 @@
-streamlit
+fastapi
+uvicorn
 pandas
 numpy
-plotly
 akshare
 yfinance
