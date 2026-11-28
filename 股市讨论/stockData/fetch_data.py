@@ -9,7 +9,7 @@ import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parent
 DEFAULT_SYMBOLS = ("QQQ", "QLD", "TQQQ")
-DEFAULT_FULL_START_DATE = "2015-01-01"
+DEFAULT_FULL_START_DATE = "2011-01-01"
 
 # Eastmoney US market prefixes: 105=NASDAQ, 106=NYSE, 107=NYSE Arca / AMEX
 KNOWN_EM_CODES: dict[str, str] = {
