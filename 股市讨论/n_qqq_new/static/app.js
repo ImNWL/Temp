@@ -4,22 +4,20 @@
   const TRADING_DAYS_PER_YEAR = 252;
   const MIN_WINDOW_BARS = 3;
 
+  // 蓝色系专属留给 QQQ / QLD / TQQQ（按 1x / 2x / 3x 从浅到深）
   const FIXED_COLORS = {
-    QQQ: "#0071E3",
-    QLD: "#0891B2",
-    TQQQ: "#E11D48",
+    QQQ: "#0EA5E9",
+    QLD: "#2563EB",
+    TQQQ: "#1E3A8A",
   };
-  const SYNTH_COLOR = "#109868";
-  const FALLBACK_PALETTE = [
-    "#5856D6",
-    "#D97706",
-    "#0284C7",
-    "#AF52DE",
-    "#EA580C",
-    "#4F46E5",
-    "#0D9488",
-    "#65A30D",
+  const SYNTH_COLOR = "#475569";
+  // 非蓝色安全色相区间（跳过 157°~264° 蓝青靛色区与 45°~83° 刺眼浅黄区，总长 211° 为质数）
+  const NON_BLUE_HUE_ARCS = [
+    [0, 44],
+    [84, 156],
+    [265, 360],
   ];
+  const NON_BLUE_TOTAL_DEG = NON_BLUE_HUE_ARCS.reduce((acc, [a, b]) => acc + (b - a), 0);
 
   const state = {
     catalog: [],
@@ -170,18 +168,52 @@
     return `${val.toFixed(digits)}x`;
   }
 
+  function hashStringFNV1a(str) {
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  function hslToHex(h, s, l) {
+    s /= 100;
+    l /= 100;
+    const k = (n) => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const toHex = (x) => Math.round(x * 255).toString(16).padStart(2, "0").toUpperCase();
+    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+  }
+
+  function colorFromName(name) {
+    const h1 = hashStringFNV1a(name);
+    const h2 = hashStringFNV1a(`${name}#sat`);
+    let pos = h1 % NON_BLUE_TOTAL_DEG;
+    let hue = 0;
+    for (const [a, b] of NON_BLUE_HUE_ARCS) {
+      if (pos < b - a) {
+        hue = a + pos;
+        break;
+      }
+      pos -= b - a;
+    }
+    const sat = 66 + (h2 % 16);
+    const light =
+      hue >= 84 && hue <= 156
+        ? 36 + ((h2 >>> 8) % 6)
+        : 40 + ((h2 >>> 8) % 9);
+    return hslToHex(hue, sat, light);
+  }
+
   function assignCatalogColors() {
     state.colorByKey.clear();
-    let fallbackIdx = 0;
     for (const item of state.catalog) {
       if (FIXED_COLORS[item.key]) {
         state.colorByKey.set(item.key, FIXED_COLORS[item.key]);
       } else {
-        state.colorByKey.set(
-          item.key,
-          FALLBACK_PALETTE[fallbackIdx % FALLBACK_PALETTE.length]
-        );
-        fallbackIdx += 1;
+        state.colorByKey.set(item.key, colorFromName(displayAssetName(item)));
       }
     }
   }
