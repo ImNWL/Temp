@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>策略对比</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261128l" />
 </head>
 <body>
   <div class="app-shell" id="app-shell">
@@ -18,8 +18,6 @@
 
         <!-- Group 1: Basket -->
         <section class="sidebar-section">
-          <div class="section-heading">对比篮子</div>
-
           <form class="add-ticker-form" id="add-ticker-form" autocomplete="off">
             <label class="field-label" for="new-ticker-input">添加新标的</label>
             <div class="add-input-row">
@@ -66,12 +64,12 @@
             <div class="setting-row">
               <label class="setting-label" for="enable-synth-toggle">叠加合成杠杆曲线</label>
               <label class="ios-switch">
-                <input type="checkbox" id="enable-synth-toggle" checked />
+                <input type="checkbox" id="enable-synth-toggle" />
                 <span class="ios-switch-slider"></span>
               </label>
             </div>
 
-            <div class="synth-controls" id="synth-controls">
+            <div class="synth-controls hidden" id="synth-controls">
               <div class="setting-row">
                 <label class="setting-label" for="synth-base-select">基准标的</label>
                 <div class="select-wrap inline-select">
@@ -141,10 +139,10 @@
               <button type="button" class="seg-btn" data-preset="近3月">近3月</button>
               <button type="button" class="seg-btn" data-preset="近6月">近6月</button>
               <button type="button" class="seg-btn" data-preset="YTD">YTD</button>
-              <button type="button" class="seg-btn" data-preset="近1年">近1年</button>
+              <button type="button" class="seg-btn active" data-preset="近1年">近1年</button>
               <button type="button" class="seg-btn" data-preset="近3年">近3年</button>
               <button type="button" class="seg-btn" data-preset="近5年">近5年</button>
-              <button type="button" class="seg-btn active" data-preset="近10年">近10年</button>
+              <button type="button" class="seg-btn" data-preset="近10年">近10年</button>
               <button type="button" class="seg-btn" data-preset="全部">全部</button>
             </div>
 
@@ -163,8 +161,8 @@
 
           <div class="control-cluster">
             <div class="segmented-control" id="scale-bar" role="tablist" aria-label="坐标轴模式">
-              <button type="button" class="seg-btn active" data-scale="linear">线性</button>
-              <button type="button" class="seg-btn" data-scale="log">对数</button>
+              <button type="button" class="seg-btn" data-scale="linear">线性</button>
+              <button type="button" class="seg-btn active" data-scale="log">对数</button>
             </div>
           </div>
         </div>
@@ -222,6 +220,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20261128m"></script>
 </body>
 </html>

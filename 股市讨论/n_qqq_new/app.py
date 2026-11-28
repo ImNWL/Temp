@@ -45,6 +45,10 @@ class RefreshTickerRequest(BaseModel):
     full: bool = False
 
 
+class DeleteTickerRequest(BaseModel):
+    symbol: str
+
+
 class EvaluateStrategiesRequest(BaseModel):
     keys: list[str]
     startDate: str | None = None
@@ -364,12 +368,45 @@ def api_refresh_tickers(req: RefreshTickerRequest) -> dict[str, Any]:
     }
 
 
+@app.post("/api/tickers/delete")
+def api_delete_ticker(req: DeleteTickerRequest) -> dict[str, Any]:
+    sym = req.symbol.strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="请提供有效的标的代码")
+
+    catalog, _ = _scan_csv_catalog()
+    entry = catalog.get(sym)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"未找到标的：{sym}")
+    if entry.kind != "market":
+        raise HTTPException(status_code=400, detail="策略不可在页面删除")
+
+    csv_path = entry.path.resolve()
+    stock_root = STOCK_DATA_DIR.resolve()
+    if stock_root not in csv_path.parents or csv_path.suffix.lower() != ".csv":
+        raise HTTPException(status_code=400, detail="非法的数据文件路径")
+
+    try:
+        csv_path.unlink(missing_ok=True)
+        _CSV_CACHE.pop(entry.path, None)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"删除文件失败：{exc}") from exc
+
+    return {
+        "deleted": sym,
+        "catalog": scan_catalog(auto_bootstrap=False),
+    }
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/")
 def serve_index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 def _run_server() -> None:

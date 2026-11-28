@@ -1,13 +1,14 @@
 """
-TQQQ / QLD 周线均线 + RSI 牛熊周期择时策略（以 QQQ 作为信号指标，纯后端实时计算模块）
+QLD / QQQ 周线均线 + RSI 牛熊周期择时策略（纯后端实时计算模块）
 
 策略规则（按所选观察窗口 [start_date, end_date] 实时计算）：
-1. 初始状态：在当前所选观察窗口首个交易日满仓持有 QLD（未进入熊市前一直持有 QLD，不在牛市中途直接切 TQQQ）。
-2. 熊市判断：当 QQQ 周线收盘跌破周线 MA40 且周线 RSI(14) < 50 时，判断进入熊市。
+1. 初始状态：在当前所选观察窗口首个交易日满仓持有 QQQ（未进入熊市前一直持有 QQQ，不在牛市中途直接切 QLD）。
+2. 熊市判断：当 QQQ 周线收盘跌破周线 MA40 且周线 RSI(14) < 50 时，判断进入熊市，记录对应前高。
 3. 反转操作：在已进入熊市后，当 QQQ 周线收盘同时站上 MA10、MA20、MA40 上方时，判断迎来反转，
-   于下一交易日起将 QLD 全部转换为 TQQQ，并锁定当时 QQQ 历史前高。
-4. 获利了结：持有 TQQQ 期间，当 QQQ 日收盘上涨到「前高 × 1.2」时，
-   于下一交易日起将 TQQQ 全部转换回 QLD，继续等待下一个熊市周期。
+   于下一交易日起将 QQQ 全部转换为 QLD。
+4. 获利了结：持有 QLD 期间，当 QQQ 日收盘上涨到「前高 × 1.15」时，于下一交易日起将 QLD 全部转换回 QQQ，
+   继续等待下一个熊市周期（若在反转操作之后、获利了结之前又触发了新的熊市判断，则保持持有 QLD，
+   并将获利了结所用的「前高」更新为新触发熊市判断对应的前高）。
 """
 
 from __future__ import annotations
@@ -19,10 +20,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-STRATEGY_KEY = "strategy:tqqq_qld_weekly_ma_rsi"
-STRATEGY_LABEL = "TQQQ/QLD 周线择时"
-STRATEGY_DESC = "窗口首日满仓QLD；以QQQ判断：入熊后站上周线MA10/20/40转TQQQ，QQQ涨至前高×1.2止盈回QLD"
-REQUIRED_SYMBOLS = ("QQQ", "QLD", "TQQQ")
+STRATEGY_KEY = "strategy:qld_qqq_weekly_ma_rsi"
+STRATEGY_LABEL = "QLD/QQQ 周线择时"
+STRATEGY_DESC = "窗口首日满仓QQQ；入熊后站上周线MA10/20/40转QLD；QQQ涨至前高×1.15止盈回QQQ"
+REQUIRED_SYMBOLS = ("QQQ", "QLD")
+TAKE_PROFIT_MULT = 1.15
 
 # 缓存全历史预计算指标，拖动时间轴连续请求时无需重复计算均线与 RSI
 _PREPARED_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -90,8 +92,7 @@ def _get_prepared_context(market_series: dict[str, pd.Series]) -> dict[str, Any]
 
     qqq_full = market_series["QQQ"].sort_index().dropna()
     qld_full = market_series["QLD"].sort_index().dropna()
-    tqqq_full = market_series["TQQQ"].sort_index().dropna()
-    if qqq_full.empty or qld_full.empty or tqqq_full.empty:
+    if qqq_full.empty or qld_full.empty:
         return None
 
     cache_key = (
@@ -101,9 +102,6 @@ def _get_prepared_context(market_series: dict[str, pd.Series]) -> dict[str, Any]
         len(qld_full),
         qld_full.index[-1],
         float(qld_full.iloc[-1]),
-        len(tqqq_full),
-        tqqq_full.index[-1],
-        float(tqqq_full.iloc[-1]),
     )
     cached = _PREPARED_CACHE.get(cache_key)
     if cached is not None:
@@ -116,14 +114,14 @@ def _get_prepared_context(market_series: dict[str, pd.Series]) -> dict[str, Any]
         {
             "QQQ": qqq_full,
             "QLD": qld_full,
-            "TQQQ": tqqq_full,
             "QQQ_PEAK": qqq_running_peak,
         }
     ).dropna()
-    aligned = aligned[(aligned["QQQ"] > 0) & (aligned["QLD"] > 0) & (aligned["TQQQ"] > 0)]
+    aligned = aligned[(aligned["QQQ"] > 0) & (aligned["QLD"] > 0)]
     if len(aligned) < 2:
         return None
 
+    week_end_dates = set(weekly_df.index)
     bear_dates = set(weekly_df.index[weekly_df["bear_sig"]])
     rev_dates = set(weekly_df.index[weekly_df["rev_sig"]])
 
@@ -131,8 +129,9 @@ def _get_prepared_context(market_series: dict[str, pd.Series]) -> dict[str, Any]
         "dates": aligned.index.strftime("%Y-%m-%d").tolist(),
         "qqq_close": aligned["QQQ"].to_numpy(dtype=float),
         "qqq_peak": aligned["QQQ_PEAK"].to_numpy(dtype=float),
+        "ret_qqq": aligned["QQQ"].pct_change().fillna(0.0).to_numpy(dtype=float),
         "ret_qld": aligned["QLD"].pct_change().fillna(0.0).to_numpy(dtype=float),
-        "ret_tqqq": aligned["TQQQ"].pct_change().fillna(0.0).to_numpy(dtype=float),
+        "is_week_end": np.array([ts in week_end_dates for ts in aligned.index], dtype=bool),
         "is_bear_sig": np.array([ts in bear_dates for ts in aligned.index], dtype=bool),
         "is_rev_sig": np.array([ts in rev_dates for ts in aligned.index], dtype=bool),
     }
@@ -191,18 +190,21 @@ def evaluate_strategy(
 
     qqq_close = ctx["qqq_close"]
     qqq_peak = ctx["qqq_peak"]
+    ret_qqq = ctx["ret_qqq"]
     ret_qld = ctx["ret_qld"]
-    ret_tqqq = ctx["ret_tqqq"]
+    is_week_end = ctx["is_week_end"]
     is_bear_sig = ctx["is_bear_sig"]
     is_rev_sig = ctx["is_rev_sig"]
 
-    # State 0: 初始/止盈后持有 QLD（等待进入下一个熊市周期）
-    # State 1: 已入熊市持有 QLD（等待 QQQ 反转信号）
-    # State 2: 反转后持有 TQQQ（一直持有至 QQQ 涨到前高*1.2 获利了结）
-    state_holdings = ("QLD", "QLD", "TQQQ")
+    # State 0: 初始/止盈后持有 QQQ（等待进入下一个熊市周期）
+    # State 1: 已入熊市持有 QQQ（等待反转信号）
+    # State 2: 反转后持有 QLD（一直持有至 QQQ 涨到前高*1.15 获利了结；中途若再触发熊市判断则更新前高）
+    state_holdings = ("QQQ", "QQQ", "QLD")
     cur_state = 0
     cur_nav = 1.0
+    bear_peak: float | None = None
     tp_target: float | None = None
+    in_state2_bear_wave = False
 
     out_dates: list[str] = []
     out_values: list[float] = []
@@ -211,7 +213,7 @@ def evaluate_strategy(
 
     for i in range(i0, i1):
         if i > i0:
-            daily_r = ret_tqqq[i] if cur_state == 2 else ret_qld[i]
+            daily_r = ret_qld[i] if cur_state == 2 else ret_qqq[i]
             cur_nav *= 1.0 + float(daily_r)
             if cur_nav < 0.0:
                 cur_nav = 0.0
@@ -221,39 +223,84 @@ def evaluate_strategy(
         out_values.append(round(cur_nav, 6))
         out_holdings.append(state_holdings[cur_state])
 
-        # 计算当日收盘后的状态转移（下一交易日起生效）
+        # 计算当日收盘后的状态转移（换仓于下一交易日起生效）
         next_state = cur_state
         marker_info: dict[str, Any] | None = None
+        is_position_switch = False
 
         if cur_state == 0:
             if is_bear_sig[i]:
                 next_state = 1
+                bear_peak = float(qqq_peak[i])
+                q_px = float(qqq_close[i])
+                marker_info = {
+                    "date": d_str,
+                    "effectiveDate": d_str,
+                    "qqqPrice": round(q_px, 2),
+                    "shape": "circle",
+                    "hollow": True,
+                    "color": "#E11D48",
+                    "tag": "熊市",
+                    "hud": f"熊市判断 · 前高 {bear_peak:.2f}",
+                }
         elif cur_state == 1:
-            if is_rev_sig[i]:
+            if is_bear_sig[i]:
+                bear_peak = float(qqq_peak[i])
+            elif is_rev_sig[i]:
                 next_state = 2
-                tp_target = float(qqq_peak[i]) * 1.2
+                in_state2_bear_wave = False
+                ref_peak = bear_peak if bear_peak is not None else float(qqq_peak[i])
+                tp_target = ref_peak * TAKE_PROFIT_MULT
+                q_px = float(qqq_close[i])
+                is_position_switch = True
                 marker_info = {
                     "date": d_str,
                     "effectiveDate": dates[i + 1] if i + 1 < i1 else d_str,
+                    "qqqPrice": round(q_px, 2),
+                    "shape": "triangle",
                     "direction": "up",
                     "color": "#109868",
-                    "tag": "→TQQQ",
-                    "hud": "反转→TQQQ",
+                    "tag": "→QLD",
+                    "hud": "反转→QLD",
                 }
         elif cur_state == 2:
             if tp_target is not None and qqq_close[i] >= tp_target:
                 next_state = 0
+                in_state2_bear_wave = False
+                q_px = float(qqq_close[i])
+                is_position_switch = True
                 marker_info = {
                     "date": d_str,
                     "effectiveDate": dates[i + 1] if i + 1 < i1 else d_str,
+                    "qqqPrice": round(q_px, 2),
+                    "shape": "triangle",
                     "direction": "down",
                     "color": "#D97706",
-                    "tag": "止盈→QLD",
-                    "hud": "止盈→QLD",
+                    "tag": "止盈→QQQ",
+                    "hud": "止盈→QQQ",
                 }
+                bear_peak = None
                 tp_target = None
+            elif is_bear_sig[i]:
+                bear_peak = float(qqq_peak[i])
+                tp_target = bear_peak * TAKE_PROFIT_MULT
+                if not in_state2_bear_wave:
+                    in_state2_bear_wave = True
+                    q_px = float(qqq_close[i])
+                    marker_info = {
+                        "date": d_str,
+                        "effectiveDate": d_str,
+                        "qqqPrice": round(q_px, 2),
+                        "shape": "circle",
+                        "hollow": True,
+                        "color": "#E11D48",
+                        "tag": "再入熊市",
+                        "hud": f"再入熊市 · 前高 {bear_peak:.2f}",
+                    }
+            elif is_week_end[i]:
+                in_state2_bear_wave = False
 
-        if marker_info is not None and i + 1 < i1:
+        if marker_info is not None and (not is_position_switch or i + 1 < i1):
             out_markers.append(marker_info)
 
         cur_state = next_state
@@ -303,7 +350,7 @@ def _load_local_close(csv_path: Path) -> pd.Series:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="运行 TQQQ/QLD 周线均线+RSI 择时策略回测")
+    parser = argparse.ArgumentParser(description="运行 QLD/QQQ 周线均线+RSI 择时策略回测")
     parser.add_argument("--start", default=None, help="观察窗口开始日期 YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="观察窗口结束日期 YYYY-MM-DD")
     args = parser.parse_args()
@@ -324,7 +371,7 @@ def main() -> None:
     print(f"策略: {STRATEGY_LABEL}")
     print(f"区间: {res['dates'][0]} ~ {res['dates'][-1]} ({len(vals)} 交易日)")
     print(f"最终倍数: {final_mult:.2f}x | 累计收益: {(final_mult - 1) * 100:+.2f}% | 最大回撤: {max_dd * 100:.2f}%")
-    print(f"换仓次数: {len(res['markers'])}")
+    print(f"事件数: {len(res['markers'])}")
     for m in res["markers"]:
         print(f"  信号日 {m['date']} -> 生效日 {m['effectiveDate']}: {m['hud']}")
 

@@ -30,12 +30,12 @@
     remoteEvalByKey: new Map(),
 
     selectedKeys: [],
-    enableSynth: true,
+    enableSynth: false,
     synthBase: "QQQ",
     leverage: 1.5,
 
-    preset: "近10年",
-    scaleMode: "linear", // "linear" | "log"
+    preset: "近1年",
+    scaleMode: "log", // "linear" | "log"
     focusCurve: "__ALL__",
 
     masterDates: [],
@@ -275,7 +275,7 @@
     dom.endDateInput.max = globalMax;
 
     if (!state.initializedWindow) {
-      applyPreset("近10年", false);
+      applyPreset("近1年", false);
       state.initializedWindow = true;
     } else if (state.preset) {
       applyPreset(state.preset, false);
@@ -395,6 +395,7 @@
       navArr.fill(NaN);
       const ddArr = new Float64Array(N);
       ddArr.fill(NaN);
+      let priceArr = null;
       let holdingArr = null;
       let switchEventArr = null;
       const switchPoints = [];
@@ -446,8 +447,10 @@
             switchPoints.push({
               localIdx,
               date: mk.date,
+              shape: mk.shape || "triangle",
               direction: mk.direction || "up",
               color: mk.color || null,
+              hollow: Boolean(mk.hollow),
               tagText: mk.tag || "",
             });
             if (mk.hud) {
@@ -485,6 +488,10 @@
         }
       } else {
         const baseVal = entry.values[i0];
+        if (entry.kind === "market") {
+          priceArr = new Float64Array(N);
+          priceArr.fill(NaN);
+        }
         for (let i = i0; i < i1; i++) {
           const dStr = entry.dates[i];
           const mIdx = state.masterDateToIdx.get(dStr);
@@ -494,6 +501,7 @@
 
           const nav = entry.values[i] / baseVal;
           navArr[localIdx] = nav;
+          if (priceArr) priceArr[localIdx] = entry.values[i];
           if (nav > peak) peak = nav;
           ddArr[localIdx] = peak > 0 ? nav / peak - 1.0 : 0.0;
 
@@ -521,6 +529,7 @@
         width: entry.kind === "strategy" ? 1.65 : 1.4,
         navArr,
         ddArr,
+        priceArr,
         holdingArr,
         switchEventArr,
         switchPoints,
@@ -806,10 +815,16 @@
   function renderMainChart(model) {
     const rect = dom.chartStage.getBoundingClientRect();
     const cssW = Math.max(320, Math.floor(rect.width));
-    const legendH = dom.curveLegendBar ? dom.curveLegendBar.offsetHeight : 42;
-    const noticesH = dom.chartNotices ? dom.chartNotices.offsetHeight : 0;
-    const overhead = 252 + legendH + (noticesH > 0 ? noticesH + 8 : 0);
-    const cssH = Math.max(360, Math.min(520, window.innerHeight - overhead));
+    const isWideMonitor = window.innerWidth >= 1680;
+
+    // 精确测量画布上方与下方时间轴标尺占用的真实像素（与滚动位置无关），最大化画布高度且保证标尺完整露出
+    const chartTopInDoc = Math.round(rect.top + window.scrollY);
+    const navSectionEl = dom.navigatorStage ? dom.navigatorStage.parentElement : null;
+    const navTotalH = navSectionEl ? navSectionEl.offsetHeight : isWideMonitor ? 74 : 98;
+    const bottomReserve = isWideMonitor ? 18 : 26;
+    const fitViewportH = window.innerHeight - chartTopInDoc - navTotalH - bottomReserve;
+    const minChartH = isWideMonitor ? 620 : 360;
+    const cssH = Math.max(minChartH, Math.min(1080, fitViewportH));
 
     const dpr = window.devicePixelRatio || 1;
     if (dom.mainCanvas.width !== Math.round(cssW * dpr) || dom.mainCanvas.height !== Math.round(cssH * dpr)) {
@@ -824,16 +839,17 @@
     ctx.clearRect(0, 0, cssW, cssH);
 
     const isLog = state.scaleMode === "log";
-    const padL = 62;
-    const padR = 20;
-    const padT = 10;
-    const padB = 25;
+    const padL = isWideMonitor ? 50 : 62;
+    const padR = isWideMonitor ? 12 : 20;
+    const padT = isWideMonitor ? 8 : 10;
+    const padB = 24;
     const plotW = Math.max(80, cssW - padL - padR);
     const totalPlotH = cssH - padT - padB;
 
-    const gap = 20;
+    const gap = isWideMonitor ? 18 : 20;
+    const mainRatio = cssH >= 600 ? 0.77 : 0.74;
     const mainTop = padT;
-    const mainH = Math.round((totalPlotH - gap) * 0.74);
+    const mainH = Math.round((totalPlotH - gap) * mainRatio);
     const ddTop = mainTop + mainH + gap;
     const ddH = totalPlotH - mainH - gap;
 
@@ -1162,16 +1178,13 @@
     }
     ctx.restore();
 
-    // 3.5 Strategy Markers & Callout Pills (Purely Rendered from Backend Strategy Output)
+    // 3.5 Strategy Markers (Pure Triangle Markers on Main Pane; Details Shown in Hover HUD)
     for (const c of orderedCurves) {
       if (!c.switchPoints || c.switchPoints.length === 0) continue;
       const isFocused = state.focusCurve === "__ALL__" || state.focusCurve === c.name;
-      const showTags = isFocused && c.switchPoints.length <= 28;
-      let lastTagRightX = -Infinity;
 
       ctx.save();
       ctx.globalAlpha = isFocused ? 1.0 : 0.18;
-      ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif';
 
       for (const sp of c.switchPoints) {
         const nav = c.navArr[sp.localIdx];
@@ -1184,52 +1197,37 @@
         const isUp = sp.direction !== "down";
 
         ctx.beginPath();
-        if (isUp) {
+        if (sp.shape === "circle") {
+          ctx.arc(px, py, 4.3, 0, Math.PI * 2);
+        } else if (isUp) {
           ctx.moveTo(px, py - 5.2);
           ctx.lineTo(px + 4.8, py + 4.0);
           ctx.lineTo(px - 4.8, py + 4.0);
+          ctx.closePath();
         } else {
           ctx.moveTo(px, py + 5.2);
           ctx.lineTo(px + 4.8, py - 4.0);
           ctx.lineTo(px - 4.8, py - 4.0);
+          ctx.closePath();
         }
-        ctx.closePath();
-        ctx.lineWidth = 2.2;
         ctx.lineJoin = "round";
-        ctx.strokeStyle = "#FFFFFF";
-        ctx.stroke();
-        ctx.fillStyle = mColor;
-        ctx.fill();
-
-        if (showTags && sp.tagText) {
-          const tw = ctx.measureText(sp.tagText).width;
-          const boxW = tw + 10;
-          const boxH = 16;
-          let bx = px - boxW / 2;
-          bx = Math.max(padL + 3, Math.min(padL + plotW - boxW - 3, bx));
-
-          if (bx >= lastTagRightX + 6) {
-            let by = isUp ? py + 7 : py - 7 - boxH;
-            if (by + boxH > mainTop + mainH - 2) {
-              by = py - 7 - boxH;
-            }
-            if (by < mainTop + 2) {
-              by = py + 7;
-            }
-
-            drawRoundedRect(ctx, bx, by, boxW, boxH, 4.5);
-            ctx.fillStyle = "rgba(255, 255, 255, 0.90)";
-            ctx.fill();
-            ctx.strokeStyle = hexToRgba(mColor, 0.42);
-            ctx.lineWidth = 1;
-            ctx.stroke();
-
-            ctx.fillStyle = mColor;
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText(sp.tagText, bx + boxW / 2, by + boxH / 2 + 0.5);
-            lastTagRightX = bx + boxW;
-          }
+        if (sp.hollow) {
+          ctx.lineWidth = 3.2;
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.stroke();
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fill();
+          ctx.fillStyle = hexToRgba(mColor, 0.24);
+          ctx.fill();
+          ctx.lineWidth = 1.65;
+          ctx.strokeStyle = mColor;
+          ctx.stroke();
+        } else {
+          ctx.lineWidth = 2.2;
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.stroke();
+          ctx.fillStyle = mColor;
+          ctx.fill();
         }
       }
       ctx.restore();
@@ -1384,6 +1382,8 @@
 
     for (const c of model.curves) {
       const nav = c.navArr[hIdx];
+      const price = c.priceArr ? c.priceArr[hIdx] : NaN;
+      const priceTxt = !Number.isNaN(price) ? `$${price.toFixed(2)}` : "";
       const holding = c.holdingArr ? c.holdingArr[hIdx] : null;
       const switchEvt = c.switchEventArr ? c.switchEventArr[hIdx] : null;
       const badgeTxt = switchEvt ? switchEvt.text : holding;
@@ -1392,6 +1392,7 @@
         rows.push({
           name: c.name,
           color: c.color,
+          priceTxt,
           badgeTxt,
           badgeColor,
           nav,
@@ -1403,6 +1404,7 @@
         ddRows.push({
           name: c.name,
           color: c.color,
+          priceTxt,
           badgeTxt,
           badgeColor,
           dd,
@@ -1421,11 +1423,17 @@
     ddRows.sort((a, b) => b.dd - a.dd);
 
     const renderBadge = (r) => {
-      if (!r.badgeTxt) return "";
-      const style = r.badgeColor
-        ? ` style="background:${hexToRgba(r.badgeColor, 0.13)};color:${r.badgeColor}"`
-        : "";
-      return `<span class="hud-holding"${style}>${r.badgeTxt}</span>`;
+      let out = "";
+      if (r.priceTxt) {
+        out += `<span class="hud-price">${r.priceTxt}</span>`;
+      }
+      if (r.badgeTxt) {
+        const style = r.badgeColor
+          ? ` style="background:${hexToRgba(r.badgeColor, 0.13)};color:${r.badgeColor}"`
+          : "";
+        out += `<span class="hud-holding"${style}>${r.badgeTxt}</span>`;
+      }
+      return out;
     };
 
     if (rows.length > 0) {
@@ -1459,7 +1467,6 @@
             <div class="hud-row-left">
               <span class="hud-dot" style="background:${r.color}"></span>
               <span class="hud-label">${r.name}</span>
-              ${renderBadge(r)}
             </div>
             <div class="hud-metrics">
               <span class="hud-main-val">${r.ddTxt}</span>
@@ -1503,7 +1510,7 @@
   function renderNavigator() {
     const rect = dom.navigatorStage.getBoundingClientRect();
     const cssW = Math.max(320, Math.floor(rect.width));
-    const cssH = 72;
+    const cssH = Math.max(50, Math.floor(rect.height || 72));
     const dpr = window.devicePixelRatio || 1;
 
     if (dom.navCanvas.width !== Math.round(cssW * dpr) || dom.navCanvas.height !== Math.round(cssH * dpr)) {
@@ -1540,7 +1547,7 @@
     const padR = 6;
     const trackW = Math.max(60, cssW - padL - padR);
     const chartTop = 3;
-    const chartH = 46;
+    const chartH = Math.max(28, cssH - 25);
     const rulerTop = chartTop + chartH;
     const rulerH = cssH - rulerTop;
 
@@ -1733,7 +1740,8 @@
     // Left & Right Sculpted Capsule Handles
     const drawHandle = (hx, highlighted) => {
       const hw = 10;
-      const hh = 28;
+      const hh = Math.min(28, Math.max(20, chartH - 6));
+      const inset = Math.max(5, Math.round(hh * 0.28));
       const hy = chartTop + (chartH - hh) / 2;
       ctx.save();
       ctx.shadowColor = "rgba(0, 0, 0, 0.15)";
@@ -1752,10 +1760,10 @@
       ctx.strokeStyle = highlighted ? "#FFFFFF" : "#0071E3";
       ctx.lineWidth = 1.1;
       ctx.beginPath();
-      ctx.moveTo(hx - 1.5, hy + 8);
-      ctx.lineTo(hx - 1.5, hy + hh - 8);
-      ctx.moveTo(hx + 1.5, hy + 8);
-      ctx.lineTo(hx + 1.5, hy + hh - 8);
+      ctx.moveTo(hx - 1.5, hy + inset);
+      ctx.lineTo(hx - 1.5, hy + hh - inset);
+      ctx.moveTo(hx + 1.5, hy + inset);
+      ctx.lineTo(hx + 1.5, hy + hh - inset);
       ctx.stroke();
     };
 
@@ -1810,12 +1818,58 @@
           <span class="asset-name">${displayAssetName(item)}</span>
           ${item.kind === "strategy" ? '<span class="asset-kind-tag">策略</span>' : ""}
         </div>
-        <span class="asset-check">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <path d="M2.5 7.2L5.6 10.3L11.5 3.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </span>
+        <div class="asset-item-right">
+          ${
+            item.kind === "market"
+              ? `<button type="button" class="asset-delete-btn" title="删除 ${item.key} 及本地行情数据" aria-label="删除 ${item.key}">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                    <path d="M2.5 3.2H9.5M4.5 3.2V2.3C4.5 1.9 4.8 1.6 5.2 1.6H6.8C7.2 1.6 7.5 1.9 7.5 2.3V3.2M3.6 3.2L4 9.6C4 10.1 4.4 10.4 4.9 10.4H7.1C7.6 10.4 8 10.1 8 9.6L8.4 3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>`
+              : ""
+          }
+          <span class="asset-check">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M2.5 7.2L5.6 10.3L11.5 3.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+        </div>
       `;
+      const delBtn = row.querySelector(".asset-delete-btn");
+      if (delBtn) {
+        delBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const coreHint = ["QQQ", "QLD", "TQQQ"].includes(item.key)
+            ? `\n注意：本地策略依赖 ${item.key} 行情数据，删除后相关策略将暂不可用。`
+            : "";
+          const ok = window.confirm(
+            `确定删除 ${item.key} 及其本地数据文件（${item.key}.csv）吗？${coreHint}`
+          );
+          if (!ok) return;
+
+          delBtn.disabled = true;
+          try {
+            const resp = await fetch("/api/tickers/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ symbol: item.key }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              throw new Error(data.detail || "删除失败");
+            }
+            ingestCatalogPayload(data.catalog, false);
+            rebuildMasterTimeline();
+            renderSidebarCatalog();
+            scheduleRender();
+            showToast(`已删除 ${item.key} 及其本地数据`);
+          } catch (err) {
+            showToast(err.message || "删除失败", true);
+          } finally {
+            delBtn.disabled = false;
+          }
+        });
+      }
       row.addEventListener("click", () => {
         const idx = state.selectedKeys.indexOf(item.key);
         if (idx >= 0) {
@@ -2566,11 +2620,7 @@
     assignCatalogColors();
 
     if (setDefaults) {
-      const baseDefaults = ["QQQ", "QLD", "TQQQ"].filter((k) => state.catalogMap.has(k));
-      const dynKeys = state.catalog
-        .filter((it) => it.mode === "remote_strategy")
-        .map((it) => it.key);
-      const defaults = [...baseDefaults, ...dynKeys];
+      const defaults = ["QQQ"].filter((k) => state.catalogMap.has(k));
       state.selectedKeys =
         defaults.length > 0
           ? defaults
